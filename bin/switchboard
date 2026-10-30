@@ -17,9 +17,10 @@ $CROSSBAR_TMUX_SOCKET names a tmux server other than the default (tmux -L).
 Keys:  j/k ↑/↓ select · J/K tab/shift-tab next/prev session · g/G first/last
        enter jump to pane · 1-9 jump to session N · q/esc quit
        (scoped to one session, "session" above means tab; 0/~ jumps to the
-       main switchboard, the one running without --here/--session)
+       main switchboard, the one running without --here/--session, named for
+       the session it runs in: "central" unless it is found elsewhere)
 Mouse: click a row to jump to that pane, click a card header to jump to that
-       session, wheel moves the selection; scoped, click "↖ main" in the
+       session, wheel moves the selection; scoped, click "↖ central" in the
        header to jump to the main switchboard.
 
 Jumping asks the Rex app (a client) to show the session and tab with the
@@ -508,14 +509,20 @@ def card(number, session, panes, cols, tick, selected, scoped=False):
     return lines, targets
 
 
-MAIN_LINK = "↖ main"
+# what a local board calls the main switchboard: the label of the session it
+# runs in, once found (Board.refresh looks), else "central"
+MAIN_LABEL = "central"
+
+
+def main_link():
+    return f"↖ {MAIN_LABEL}"
 
 
 def main_link_span(cols):
     """Columns [start, end) of the header's main link, in line coordinates."""
     cols = max(min(cols, 100), 36)
     end = cols - len(time.strftime("%H:%M")) - 2
-    return end - len(MAIN_LINK), end
+    return end - width(main_link()), end
 
 
 def render(data, cols, tick=0, selected=None, scope_label=None, link_hot=False):
@@ -539,7 +546,7 @@ def render(data, cols, tick=0, selected=None, scope_label=None, link_hot=False):
         start, _ = main_link_span(cols)
         subtitle = fit(subtitle, max(start - len("◇ switchboard ") - 1, 1))
         head = f"{ACCENT}{BOLD}◇ switchboard{RESET} {MUTED}{subtitle}{RESET}"
-        right = f"{ACCENT if link_hot else DIM}{MAIN_LINK}{RESET}  {right}"
+        right = f"{ACCENT if link_hot else DIM}{main_link()}{RESET}  {right}"
         lines = [head + " " * max(start - width(head), 1) + right]
     else:
         lines = [head + " " * max(cols - width(head) - len(clock), 1) + right]
@@ -556,7 +563,7 @@ def footer(cols, status, scoped=False):
     group = "tab" if scoped else "session"
     keys = [("↑↓", "select"), ("⇥", group), ("⏎", "jump"), ("1-9", group), ("click", "jump"), ("q", "quit")]
     if scoped:
-        keys.insert(-1, ("0", "main"))
+        keys.insert(-1, ("0", MAIN_LABEL))
     hint = "  ".join(f"{MUTED}{k}{RESET} {DIM}{v}{RESET}" for k, v in keys)
     for spare in ("click", "⇥", "↑↓"):   # a narrow pane: drop hints rather than wrap
         if width(hint) <= cols:
@@ -590,12 +597,23 @@ class Board:
 
     # data
     def refresh(self):
+        looked = 0.0
         while True:
             fresh = snapshot(self.scope)
             client = app_client()
             with self.lock:
                 self.data, self.client = fresh, client
+            if self.scope and time.time() - looked > 30:   # name the main link
+                looked = time.time()
+                self.found_main(find_main())
             time.sleep(2)
+
+    def found_main(self, target):
+        """Cache TARGET (find_main's answer) and name the main link after its session."""
+        global MAIN_LABEL
+        self.main = target
+        if target:
+            MAIN_LABEL = target[1]
 
     def order(self):
         """Selectable panes in screen order, as (block_id, group): the group is the
@@ -717,7 +735,7 @@ class Board:
     def jump_main(self):
         """Jump to the main switchboard pane, found by find_main and cached."""
         self.link_at = time.time()
-        self.say(MUTED, "→ main")
+        self.say(MUTED, f"→ {MAIN_LABEL}")
         threading.Thread(target=self._jump_main, daemon=True).start()
 
     def _jump_main(self):
@@ -727,16 +745,17 @@ class Board:
             wid = main_window(sid, bid)
             cached = (*cached[:2], wid, bid) if wid else None   # it may have moved tabs
         target = cached or find_main()
-        self.main = target
+        self.found_main(target)
         if not target:
-            self.say(COLORS["blocked"], "✗ no main switchboard")
+            self.say(COLORS["blocked"], f"✗ no {MAIN_LABEL} switchboard")
             return
         sid, label, wid, bid = target
         if not self._jump(sid, wid, bid, label) and cached:
             # the cached pane may have just gone; look again once
-            target = self.main = find_main()
+            target = find_main()
+            self.found_main(target)
             if not target:
-                self.say(COLORS["blocked"], "✗ no main switchboard")
+                self.say(COLORS["blocked"], f"✗ no {MAIN_LABEL} switchboard")
                 return
             sid, label, wid, bid = target
             self._jump(sid, wid, bid, label)
@@ -958,6 +977,11 @@ def main():
     if "--json" in args:
         print(json.dumps([{"group": g, "panes": panes} for g, panes in snapshot(scope)], indent=1))
     elif "--once" in args:
+        if scope:
+            hit = find_main()
+            if hit:
+                global MAIN_LABEL
+                MAIN_LABEL = hit[1]
         print("\n".join(render(snapshot(scope), shutil.get_terminal_size().columns, scope_label=label)[0]))
     else:
         # in tmux, mark this pane so others can find the main switchboard

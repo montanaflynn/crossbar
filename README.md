@@ -62,3 +62,7 @@ Edit this repo, then run `./install` to try your changes. Installing replaces
 `bin/` and `operator.md` in `~/.crossbar`, so make changes here, not in the installed
 copy. It never touches `projects/` or `central/`. Files are swapped in by
 rename, so panes already running the old copy keep working.
+
+## License
+
+MIT

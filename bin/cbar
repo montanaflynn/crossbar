@@ -20,6 +20,7 @@ usage() {
   board [--here|--session N]   run the switchboard (--once prints once and exits)
   ls                           registered projects, their sessions and operators
   open NAME                    switch to that project's session
+  rm [-y] NAME                 kill its session and unregister it (asks first)
   agent ...                    start and watch agents in this session (cbar agent help)
   update                       install the latest crossbar from GitHub
   version                      the installed version
@@ -224,6 +225,59 @@ cmd_ls() {
   print -l -- $rows | column -t -s $'\t'
 }
 
+# cbar rm [-y] NAME: kill the project's session and unregister it, its briefs
+# and reports with it. Says what that means and asks first, unless -y.
+cmd_rm() {
+  local yes= name home term sid running= agents
+  [[ $1 == -y || $1 == --yes ]] && { yes=1; shift }
+  name=$1
+  [[ -z $name ]] && die "usage: cbar rm [-y] NAME"
+  [[ $name == */* || $name == . || $name == .. ]] && die "no project '$name'"
+  home=$CROSSBAR/projects/$name
+  if [[ -f $home/project.toml ]]; then
+    term=$(toml_get $home/project.toml terminal) || term=rex
+  elif tmux_has $name; then
+    term=tmux   # not registered: the session can still go
+  elif [[ -n $(rex_session_id $name) ]]; then
+    term=rex
+  else
+    die "no project or session '$name' (cbar ls)"
+  fi
+  if [[ $term == tmux ]]; then
+    tmux_has $name && running=1
+  else
+    sid=$(rex_session_id $name)
+    [[ -n $sid ]] && running=1
+  fi
+
+  local -a what
+  if [[ -n $running ]]; then
+    agents=$(panes --session $name 2>/dev/null | jq -r 'select(.state != "") | "\(.tab) (\(.state))"' |
+      paste -sd, - | sed 's/,/, /g')
+    what+=("kill the $term session '$name'${agents:+, with $agents}")
+  fi
+  if [[ -d $home ]]; then
+    local -a briefs=($home/briefs/*(N)) reports=($home/reports/*(N))
+    what+=("delete ${home/#$HOME/~} ($#briefs briefs, $#reports reports)")
+  fi
+  if [[ -z $yes ]]; then
+    [[ -t 0 ]] || die "pass -y to remove '$name' without asking"
+    print "cbar rm $name will:"
+    print -l -- "  "${^what}
+    if ! read -q "?go ahead? [y/N] "; then
+      print "\nleft it alone"
+      return 1
+    fi
+    print
+  fi
+  # unregister first: removing the session from inside it ends this process
+  [[ -d $home ]] && rm -r -- $home
+  print "removed $name"
+  if [[ -n $running ]]; then
+    if [[ $term == tmux ]]; then tm kill-session -t "=$name"; else rex kill $sid >/dev/null; fi
+  fi
+}
+
 # cbar open [-n] NAME: -n prints the command instead of running it. tmux:
 # switch this client inside tmux, else attach in this terminal.
 cmd_open() {
@@ -412,6 +466,7 @@ case $1 in
   board) shift; cmd_board "$@" ;;
   ls) shift; cmd_ls "$@" ;;
   open) shift; cmd_open "$@" ;;
+  rm) shift; cmd_rm "$@" ;;
   agent) shift; cmd_agent "$@" ;;
   update) shift; cmd_update "$@" ;;
   version|--version) cmd_version ;;

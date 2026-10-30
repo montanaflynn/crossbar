@@ -40,6 +40,7 @@ cbar operator                        run the operator Claude in this pane
 cbar board [--here|--session N]      run the switchboard (--once prints once, --json prints JSON)
 cbar ls                              registered projects, their terminal, sessions and operators
 cbar open NAME                       switch to that project's session (outside tmux: attach to it)
+cbar rm [-y] NAME                    kill its session and unregister it, briefs and reports too (asks first)
 ```
 
 Operators start and watch agents in their own session, the same way in Rex and tmux:

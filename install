@@ -1,18 +1,25 @@
 #!/bin/zsh
-# install: install crossbar from this checkout into ~/.crossbar ($CROSSBAR_HOME)
-# and link cbar and switchboard into ~/.local/bin ($CROSSBAR_LINKS).
+# install [--build]: install crossbar from this checkout into ~/.crossbar
+# ($CROSSBAR_HOME) and link cbar, switchboard and claude-relay into
+# ~/.local/bin ($CROSSBAR_LINKS). claude-relay is downloaded from the GitHub
+# release for this version (checksum verified), else built with cargo;
+# --build always builds it from this checkout.
 # Your data (projects/, central/) is never touched. Files are replaced by
 # rename, so panes running the old copies keep working.
 emulate -L zsh
 
 src=${0:A:h} dest=${CROSSBAR_HOME:-~/.crossbar} links=${CROSSBAR_LINKS:-~/.local/bin}
+releases=${CROSSBAR_RELEASES:-https://github.com/montanaflynn/crossbar/releases/download}
 version=$(<$src/VERSION)
 commit=$(git -C $src rev-parse --short HEAD 2>/dev/null)
 [[ -n $commit && -n $(git -C $src status --porcelain 2>/dev/null) ]] && commit+=-dirty
+build=
+[[ $1 == --build ]] && build=1
 
-for tool in rex jq claude python3; do
+for tool in jq claude python3; do
   (( $+commands[$tool] )) || print -u2 "install: warning: $tool is not on PATH"
 done
+(( $+commands[rex] || $+commands[tmux] )) || print -u2 "install: warning: neither rex nor tmux is on PATH"
 
 mkdir -p $dest/bin $dest/central/briefs $dest/central/reports $dest/projects $links || exit 1
 
@@ -24,16 +31,44 @@ put() {
 put $src/bin/cbar $dest/bin/cbar 755
 put $src/bin/switchboard $dest/bin/switchboard 755
 
-# claude-relay (Rust) gives Claude's full status in tmux; without cargo,
+# claude-relay (Rust) gives Claude's full status in tmux; without it,
 # crossbar runs plain claude there
-if (( $+commands[cargo] )); then
-  if cargo build --release --locked -q --manifest-path $src/claude-relay/Cargo.toml; then
-    put $src/claude-relay/target/release/claude-relay $dest/bin/claude-relay 755
-  else
-    print -u2 "install: warning: claude-relay did not build; tmux shows less status"
+asset() {
+  local os arch
+  case $(uname -s) in Darwin) os=darwin ;; Linux) os=linux ;; *) return 1 ;; esac
+  case $(uname -m) in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=x86_64 ;; *) return 1 ;; esac
+  print claude-relay-$os-$arch
+}
+
+# download: the release's binary for this platform, if its checksum matches
+download() {
+  local name tmp ok=
+  name=$(asset) || return 1
+  tmp=$(mktemp -d) || return 1
+  if curl -fsL -o $tmp/$name $releases/v$version/$name &&
+     curl -fsL -o $tmp/SHA256SUMS $releases/v$version/SHA256SUMS; then
+    local sum=$(grep " $name\$" $tmp/SHA256SUMS | cut -d' ' -f1)
+    local got=$( (shasum -a 256 $tmp/$name 2>/dev/null || sha256sum $tmp/$name) | cut -d' ' -f1)
+    if [[ -n $sum && $sum == $got ]]; then
+      put $tmp/$name $dest/bin/claude-relay 755 && ok=1
+    else
+      print -u2 "install: claude-relay download failed its checksum"
+    fi
   fi
-else
-  print -u2 "install: warning: no cargo (https://rustup.rs), so no claude-relay; tmux shows less status"
+  rm -rf $tmp
+  [[ -n $ok ]]
+}
+
+compile() {
+  (( $+commands[cargo] )) || return 1
+  cargo build --release --locked -q --manifest-path $src/claude-relay/Cargo.toml &&
+    put $src/claude-relay/target/release/claude-relay $dest/bin/claude-relay 755
+}
+
+if [[ -n $build ]]; then
+  compile || print -u2 "install: warning: claude-relay did not build; tmux shows less status"
+elif ! download && ! compile; then
+  print -u2 "install: warning: no claude-relay for v$version (no release binary, no cargo); tmux shows less status"
 fi
 rm -f $dest/bin/relay   # the Python relay it replaced
 put $src/operator.md $dest/operator.md 644

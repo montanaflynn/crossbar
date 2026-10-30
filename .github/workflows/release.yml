@@ -1,0 +1,52 @@
+# On a version tag (v0.4.1), build claude-relay for macOS and Linux and attach
+# the binaries and their SHA256SUMS to the GitHub release, where ./install
+# downloads them.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { runner: macos-14, target: aarch64-apple-darwin, asset: claude-relay-darwin-arm64 }
+          - { runner: macos-14, target: x86_64-apple-darwin, asset: claude-relay-darwin-x86_64 }
+          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-musl, asset: claude-relay-linux-x86_64 }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, asset: claude-relay-linux-arm64 }
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: claude-relay
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add ${{ matrix.target }}
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q musl-tools
+      - run: cargo test --locked
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - run: cp target/${{ matrix.target }}/release/claude-relay ${{ matrix.asset }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: claude-relay/${{ matrix.asset }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: cd dist && sha256sum claude-relay-* > SHA256SUMS && cat SHA256SUMS
+      - run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" --notes "claude-relay binaries for macOS and Linux. Install crossbar with ./install; it downloads the one for your platform."
+        env:
+          GH_TOKEN: ${{ github.token }}

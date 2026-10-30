@@ -14,8 +14,8 @@ Run a team of Claude Code agents across projects, in Rex or tmux.
 ## Install
 
 Requires zsh, Python 3, [jq](https://jqlang.org), [Claude Code](https://claude.com/claude-code),
-and Rex or tmux (3.0+). For full agent status in tmux, also [Rust](https://rustup.rs): `./install`
-builds `claude-relay` with cargo.
+and Rex or tmux (3.0+), on macOS or Linux. `./install` downloads `claude-relay` for your
+platform from the GitHub release (or builds it, if [cargo](https://rustup.rs) is installed).
 
 ```sh
 git clone https://github.com/montanaflynn/crossbar.git
@@ -96,7 +96,9 @@ have the agent write its results to `projects/<name>/reports/<task>.md`.
 
 ## Develop
 
-Edit this repo, then run `./install` to try your changes. Installing replaces
+Edit this repo, then run `./install` to try your changes (`./install --build` to build
+`claude-relay` from your checkout instead of downloading the release). Pushing a tag
+`vX.Y.Z` that matches `VERSION` builds the release binaries in GitHub Actions. Installing replaces
 `bin/` and `operator.md` in `~/.crossbar`, so make changes here, not in the installed
 copy. It never touches `projects/` or `central/`. Files are swapped in by
 rename, so panes already running the old copy keep working.

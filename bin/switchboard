@@ -1,0 +1,761 @@
+#!/usr/bin/env python3
+"""switchboard: live overview of every Rex session (one per project), and a way to jump to any pane.
+
+Each session is a card; each pane a row with its tab name, program status
+(idle / working / done / blocked / error, as reported via OSC 7501) and how
+long it has been in that state.
+
+  switchboard                 live view of every session
+  switchboard --session NAME  live view of one session: a card per tab
+  switchboard --here          same, for this pane's session ($REX_SESSION)
+  switchboard --once          print once and exit (combines with the above)
+
+Keys:  j/k ↑/↓ select · J/K tab/shift-tab next/prev session · g/G first/last
+       enter jump to pane · 1-9 jump to session N · q/esc quit
+       (scoped to one session, "session" above means tab; 0/~ jumps to the
+       main switchboard, the one running without --here/--session)
+Mouse: click a row to jump to that pane, click a card header to jump to that
+       session, wheel moves the selection; scoped, click "↖ main" in the
+       header to jump to the main switchboard.
+
+Jumping asks the Rex app (a client) to show the session and tab with the
+client action session.select, then focuses the pane with session.focus_block.
+"""
+import base64
+import json
+import os
+import re
+import select
+import shutil
+import signal
+import subprocess
+import sys
+import termios
+import threading
+import time
+import tty
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+
+HOME = os.path.expanduser("~")
+ME = os.getpid()
+MY_BLOCK = os.environ.get("REX_BLOCK", "")
+
+
+def rgb(hex_, bg=False):
+    r, g, b = (int(hex_[i:i + 2], 16) for i in (1, 3, 5))
+    return f"\033[{48 if bg else 38};2;{r};{g};{b}m"
+
+
+# CarbonFox
+FG, SUBTLE, MUTED, FAINT = rgb("#f2f4f8"), rgb("#b6b8bb"), rgb("#7b7c7e"), rgb("#353535")
+DIM = rgb("#525253")
+ACCENT = rgb("#be95ff")
+SEL = rgb("#2a2a2a", bg=True)
+COLORS = {
+    "blocked": rgb("#ee5396"),
+    "error": rgb("#ff7eb6"),
+    "done": rgb("#25be6a"),
+    "working": rgb("#78a9ff"),
+    "idle": MUTED,
+}
+BOLD, ITALIC, RESET = "\033[1m", "\033[3m", "\033[0m"
+ORDER = ["blocked", "error", "done", "working", "idle"]
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+ANSI = re.compile(r"\033\[[0-9;]*m")
+
+
+def run(*args):
+    try:
+        out = subprocess.run(["rex", *args], capture_output=True, text=True, timeout=5)
+        return out.returncode, out.stdout, out.stderr.strip()
+    except subprocess.TimeoutExpired:
+        return 1, "", "timed out"
+
+
+def rex(*args):
+    code, out, _ = run(*args)
+    try:
+        return json.loads(out) if code == 0 and out.strip() else None
+    except json.JSONDecodeError:
+        return None
+
+
+def text(value):
+    """Free-text status values are base64 per the protocol; show them decoded."""
+    if not value:
+        return ""
+    try:
+        decoded = base64.b64decode(value + "=" * (-len(value) % 4), validate=True).decode()
+        return decoded if decoded.isprintable() else value
+    except (ValueError, UnicodeDecodeError):
+        return value
+
+
+def short(path):
+    return "~" + path[len(HOME):] if path and path.startswith(HOME) else (path or "")
+
+
+def age(stamp):
+    if not stamp:
+        return ""
+    try:
+        secs = (datetime.now(timezone.utc) - datetime.fromisoformat(stamp)).total_seconds()
+    except ValueError:
+        return ""
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if secs >= size:
+            return f"{int(secs // size)}{unit}"
+    return "now"
+
+
+def pane(session_id, block, tabs):
+    bid = block["block_id"]
+    if bid == MY_BLOCK:
+        return None
+    proc = rex("block", "call", "-s", session_id, "-b", bid, "process") or {}
+    fg = proc.get("foreground") or {}
+    if fg.get("pid") == ME:
+        return None
+    status = rex("block", "call", "-s", session_id, "-b", bid, "program_status") or {}
+    records = status.get("records") or []
+    root = next((r for r in records if not r.get("id")), records[0] if records else {})
+    # an interpreter running a script (python switchboard, …) is named after the script
+    program = os.path.basename(fg.get("script") or fg.get("argv0") or fg.get("name") or "?").lstrip("-")
+    return {
+        "session_id": session_id,
+        "block_id": bid,
+        "window_id": block.get("window_id", ""),
+        "tab": tabs.get(block.get("window_id"), ""),
+        "label": block.get("label", ""),
+        "program": program,
+        "cwd": short(fg.get("cwd")),
+        "state": root.get("state", ""),
+        "kind": root.get("kind", ""),
+        "msg": text(root.get("msg")),
+        "since": age(root.get("updated_at")),
+    }
+
+
+def resolve(name):
+    """A session id for NAME, a session label or id; None if there is none."""
+    sessions = (rex("ls", "--json") or {}).get("sessions", [])
+    return next((s for s in sessions if name in (s["session_id"], s.get("label"))), None)
+
+
+def snapshot(scope=None):
+    if scope:
+        return tabs_snapshot(scope)
+    sessions = (rex("ls", "--json") or {}).get("sessions", [])
+    jobs = []
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        for s in sessions:
+            sid = s["session_id"]
+            windows = (rex("window", "ls", "-s", sid, "--json") or {}).get("windows", [])
+            tabs = {w["window_id"]: w.get("label", "") for w in windows}
+            blocks = (rex("block", "ls", "-s", sid, "--json") or {}).get("blocks", [])
+            blocks = [b for b in blocks if b.get("placement", "placed") == "placed"]
+            jobs.append((s, [pool.submit(pane, sid, b, tabs) for b in blocks]))
+        return [(s, [p for p in (f.result() for f in futures) if p]) for s, futures in jobs]
+
+
+def tabs_snapshot(sid):
+    """One session, grouped by tab: [(tab, panes)] in tab order. A tab is the
+    window dict plus session_id."""
+    windows = (rex("window", "ls", "-s", sid, "--json") or {}).get("windows", [])
+    tabs = {w["window_id"]: w.get("label", "") for w in windows}
+    blocks = (rex("block", "ls", "-s", sid, "--json") or {}).get("blocks", [])
+    blocks = [b for b in blocks if b.get("placement", "placed") == "placed"]
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        futures = [(b.get("window_id"), pool.submit(pane, sid, b, tabs)) for b in blocks]
+        panes = [(wid, f.result()) for wid, f in futures]
+    return [(dict(w, session_id=sid), [p for wid, p in panes if p and wid == w["window_id"]])
+            for w in windows]
+
+
+def is_main_board(sid, block):
+    """Whether BLOCK runs the main switchboard: labelled switchboard, its
+    foreground process the switchboard script, with no --here/--session.
+    Rex reports argv0 only, so the rest of argv comes from ps (same host)."""
+    if block.get("label") != "switchboard" or block.get("placement", "placed") != "placed":
+        return False
+    if block["block_id"] == MY_BLOCK:
+        return False
+    fg = (rex("block", "call", "-s", sid, "-b", block["block_id"], "process") or {}).get("foreground") or {}
+    if os.path.basename(fg.get("script") or fg.get("argv0") or fg.get("name") or "") != "switchboard":
+        return False
+    try:
+        argv = subprocess.run(["ps", "-o", "args=", "-p", str(fg["pid"])],
+                              capture_output=True, text=True, timeout=5).stdout.split()
+    except (KeyError, subprocess.TimeoutExpired):
+        return False
+    i = next((k for k, a in enumerate(argv) if os.path.basename(a) == "switchboard"), None)
+    if i is None:
+        return False
+    return not any(a in ("--here", "--session") or a.startswith("--session=") for a in argv[i + 1:])
+
+
+def find_main(prefer=None):
+    """(session id, session label, window id, block id) of the main switchboard,
+    or None. Sessions are searched in order, PREFER (a session id) first."""
+    sessions = (rex("ls", "--json") or {}).get("sessions", [])
+    sessions.sort(key=lambda s: s["session_id"] != prefer)
+    for s in sessions:
+        sid = s["session_id"]
+        blocks = (rex("block", "ls", "-s", sid, "--json") or {}).get("blocks", [])
+        for b in blocks:
+            if is_main_board(sid, b):
+                return sid, s.get("label") or sid[-6:], b.get("window_id"), b["block_id"]
+    return None
+
+
+def app_client():
+    """The Rex app to drive: prefer an app attached to our own session."""
+    clients = (rex("client", "ls", "--json") or {}).get("clients", [])
+    apps = [c for c in clients if (c.get("info") or {}).get("kind") == "app"
+            and c.get("connection_state", "connected") == "connected"]
+    mine = os.environ.get("REX_SESSION", "")
+    apps.sort(key=lambda c: mine not in (c.get("session_ids") or []))
+    return apps[0]["client_id"] if apps else None
+
+
+def width(s):
+    return len(ANSI.sub("", s))
+
+
+def fit(s, n):
+    """Cut plain text to n columns."""
+    return s if len(s) <= n else s[:max(n - 1, 0)] + "…"
+
+
+def rank(state):
+    return ORDER.index(state) if state in ORDER else len(ORDER)
+
+
+def glyph(state, tick):
+    if state == "working":
+        return SPINNER[tick % len(SPINNER)]
+    return {"blocked": "◆", "error": "✗", "done": "✓", "idle": "○"}.get(state, "·")
+
+
+def card(number, session, panes, cols, tick, selected, scoped=False):
+    """Lines for one session card (or, scoped, one tab card), plus a target per
+    line (what a click there means)."""
+    panes = sorted(panes, key=lambda p: rank(p["state"]))
+    top = panes[0]["state"] if panes else ""
+    edge = COLORS.get(top, FAINT) if top in ("blocked", "error", "done", "working") else FAINT
+    inner = cols - 4
+    home = Counter(p["cwd"] for p in panes if p["cwd"]).most_common(1)
+    home = home[0][0] if home else ""
+    sid = session["session_id"]
+    head_target = ("tab", sid, session["window_id"], None) if scoped else ("session", sid, None, None)
+
+    num = f"{number} " if number <= 9 else ""
+    title = f" {num}{session['label']} "
+    path = fit(home, max(inner - len(title) - 4, 0))
+    path_part = f" {path} " if path else ""
+    rule = "─" * max(cols - 3 - len(title) - len(path_part) - 1, 1)
+    lines = [f"{edge}╭─{RESET} {MUTED}{num}{RESET}{BOLD}{FG}{session['label']}{RESET} "
+             f"{edge}{rule}{RESET}{MUTED}{path_part}{RESET}{edge}─╮{RESET}"]
+    targets = [head_target]
+
+    def row(content, target=None, hot=False):
+        pad = max(inner - width(content), 0)
+        if hot:
+            content = content.replace(RESET, RESET + SEL)
+            lines.append(f"{edge}│{RESET}{SEL}{ACCENT}▎{RESET}{SEL}{content}{' ' * pad} {RESET}{edge}│{RESET}")
+        else:
+            lines.append(f"{edge}│{RESET} {content}{' ' * pad} {edge}│{RESET}")
+        targets.append(target)
+
+    if not panes:
+        row(f"{MUTED}{ITALIC}no panes{RESET}", head_target)
+    agents_seen = False
+    for p in panes:
+        is_agent = bool(p["state"])
+        if is_agent:
+            agents_seen = True
+        elif agents_seen:
+            row(f"{FAINT}{'┄' * inner}{RESET}")
+            agents_seen = False
+        hot = p["block_id"] == selected
+        target = ("pane", sid, p["window_id"], p["block_id"])
+        color = COLORS.get(p["state"], MUTED)
+        if scoped:   # the card is the tab; name the pane by its own label
+            name = p["label"] if p["label"] not in ("", "shell") else p["program"]
+        else:
+            name = p["tab"] or p["program"]
+        name = fit(name, 16)
+        board = not is_agent and p["program"] == "switchboard"
+        mark = glyph(p["state"], tick) if is_agent else ("◇" if board else "▪")
+        word = p["state"] if is_agent else p["program"]
+        right = p["since"] if is_agent else ("view" if board else "process")
+        name_color = FG if is_agent or hot else MUTED
+        mark_color = color if is_agent else (ACCENT if board else FAINT)
+        left = (f"{mark_color}{mark}{RESET} {name_color}{BOLD if hot else ''}{name:<16}{RESET}"
+                f" {color if is_agent else MUTED}{word}{RESET}")
+        if p["cwd"] and p["cwd"] != home:
+            room = inner - width(left) - len(right) - 3
+            if room > 6:
+                left += f"  {MUTED}{fit(p['cwd'], room)}{RESET}"
+        gap = max(inner - width(left) - len(right), 1)
+        row(f"{left}{' ' * gap}{MUTED if is_agent else FAINT}{right}{RESET}", target, hot)
+        detail = " · ".join(x for x in (p["kind"], p["msg"]) if x)
+        if detail and p["state"] in ("blocked", "error", "done"):
+            row(f"  {color}{ITALIC}{fit(detail, inner - 2)}{RESET}", target, hot)
+    lines.append(f"{edge}╰{'─' * (cols - 2)}╯{RESET}")
+    targets.append(None)
+    return lines, targets
+
+
+MAIN_LINK = "↖ main"
+
+
+def main_link_span(cols):
+    """Columns [start, end) of the header's main link, in line coordinates."""
+    cols = max(min(cols, 100), 36)
+    end = cols - len(time.strftime("%H:%M")) - 2
+    return end - len(MAIN_LINK), end
+
+
+def render(data, cols, tick=0, selected=None, scope_label=None, link_hot=False):
+    """Return (lines, targets): targets[i] is None, ("session", sid, None, None),
+    ("tab", sid, window_id, None) or ("pane", sid, window_id, block_id) for screen
+    line i. With scope_label, data is one session's tabs (see tabs_snapshot), and
+    the header carries a link to the main switchboard, accent-colored if link_hot."""
+    cols = max(min(cols, 100), 36)
+    counts = Counter(p["state"] for _, panes in data for p in panes if p["state"])
+    others = sum(1 for _, panes in data for p in panes if not p["state"])
+    pills = "  ".join(
+        f"{COLORS[s]}{glyph(s, tick)} {counts[s]} {s}{RESET}" for s in ORDER if counts.get(s)
+    )
+    if others:
+        pills += f"{'  ' if pills else ''}{MUTED}▪ {others} other {'pane' if others == 1 else 'panes'}{RESET}"
+    clock = time.strftime("%H:%M")
+    subtitle = f"{scope_label} · tabs & agents" if scope_label else "agents & panes by session"
+    head = f"{ACCENT}{BOLD}◇ switchboard{RESET} {MUTED}{subtitle}{RESET}"
+    right = f"{MUTED}{clock}{RESET}"
+    if scope_label:
+        start, _ = main_link_span(cols)
+        subtitle = fit(subtitle, max(start - len("◇ switchboard ") - 1, 1))
+        head = f"{ACCENT}{BOLD}◇ switchboard{RESET} {MUTED}{subtitle}{RESET}"
+        right = f"{ACCENT if link_hot else DIM}{MAIN_LINK}{RESET}  {right}"
+        lines = [head + " " * max(start - width(head), 1) + right]
+    else:
+        lines = [head + " " * max(cols - width(head) - len(clock), 1) + right]
+    lines += [pills or f"{MUTED}no agents{RESET}", ""]
+    targets = [None, None, None]
+    for n, (session, panes) in enumerate(data, 1):
+        more, hits = card(n, session, panes, cols, tick, selected, scoped=bool(scope_label))
+        lines += more
+        targets += hits
+    return lines, targets
+
+
+def footer(cols, status, scoped=False):
+    group = "tab" if scoped else "session"
+    keys = [("↑↓", "select"), ("⇥", group), ("⏎", "jump"), ("1-9", group), ("click", "jump"), ("q", "quit")]
+    if scoped:
+        keys.insert(-1, ("0", "main"))
+    hint = "  ".join(f"{MUTED}{k}{RESET} {DIM}{v}{RESET}" for k, v in keys)
+    for spare in ("click", "⇥", "↑↓"):   # a narrow pane: drop hints rather than wrap
+        if width(hint) <= cols:
+            break
+        keys = [(k, v) for k, v in keys if k != spare]
+        hint = "  ".join(f"{MUTED}{k}{RESET} {DIM}{v}{RESET}" for k, v in keys)
+    if status:
+        color, msg = status
+        msg = fit(msg, max(cols - width(hint) - 2, 12))
+        gap = cols - width(hint) - len(msg)
+        if gap < 2:
+            return f"{color}{fit(msg, cols)}{RESET}"
+        return hint + " " * gap + f"{color}{msg}{RESET}"
+    return hint
+
+
+class Board:
+    """Selection, scrolling and jumping for the live view."""
+
+    def __init__(self, scope=None, scope_label=None):
+        self.scope, self.scope_label = scope, scope_label   # session id/label when scoped to one
+        self.data, self.lock = [], threading.Lock()
+        self.selected = None        # block_id
+        self.targets = []           # per rendered line
+        self.offset = 0             # scroll
+        self.status, self.status_at = None, 0.0
+        self.client = None
+        self.focus_in = 0.0
+        self.main = None            # cached find_main() result
+        self.link_hover, self.link_at = False, 0.0   # main link: hovered, last clicked
+
+    # data
+    def refresh(self):
+        while True:
+            fresh = snapshot(self.scope)
+            client = app_client()
+            with self.lock:
+                self.data, self.client = fresh, client
+            time.sleep(2)
+
+    def order(self):
+        """Selectable panes in screen order, as (block_id, group): the group is the
+        session id, or the tab (window id) when scoped to one session."""
+        seen, out = set(), []
+        for t in self.targets:
+            if t and t[0] == "pane" and t[3] not in seen:
+                seen.add(t[3])
+                out.append((t[3], t[2] if self.scope else t[1]))
+        return out
+
+    def groups(self):
+        """Number-key targets in card order."""
+        with self.lock:
+            if self.scope:
+                return [("tab", g["session_id"], g["window_id"], None) for g, _ in self.data]
+            return [("session", g["session_id"], None, None) for g, _ in self.data]
+
+    def keep_selection(self):
+        order = self.order()
+        ids = [b for b, _ in order]
+        if not ids:
+            return
+        if self.selected not in ids:
+            # fall back to where it was, by screen position
+            self.selected = ids[min(getattr(self, "_last_index", 0), len(ids) - 1)]
+        self._last_index = ids.index(self.selected)
+
+    # movement
+    def move(self, step):
+        ids = [b for b, _ in self.order()]
+        if not ids:
+            return
+        i = ids.index(self.selected) if self.selected in ids else 0
+        self.selected = ids[max(0, min(len(ids) - 1, i + step))]
+
+    def edge(self, last):
+        ids = [b for b, _ in self.order()]
+        if ids:
+            self.selected = ids[-1 if last else 0]
+
+    def hop(self, step):
+        """Select the first pane of the next/previous session that has panes."""
+        order = self.order()
+        if not order:
+            return
+        current = dict(order).get(self.selected, order[0][1])
+        firsts = []
+        for b, s in order:
+            if not firsts or firsts[-1][1] != s:
+                firsts.append((b, s))
+        i = next((k for k, (_, s) in enumerate(firsts) if s == current), 0)
+        self.selected = firsts[(i + step) % len(firsts)][0]
+
+    def first_pane_of(self, group):
+        return next((b for b, g in self.order() if g == group), None)
+
+    # jumping
+    def say(self, color, msg):
+        self.status, self.status_at = (color, msg), time.time()
+
+    def names(self, sid, bid=None, wid=None):
+        with self.lock:
+            if self.scope:
+                tab = next((g.get("label", "") for g, _ in self.data if g["window_id"] == wid), "")
+                p = next((p for _, ps in self.data for p in ps if p["block_id"] == bid), None)
+                if p:
+                    tab = " › ".join(x for x in (tab, p["label"] if p["label"] not in ("", "shell")
+                                                 else p["program"]) if x)
+                return self.scope_label, tab
+            for s, panes in self.data:
+                if s["session_id"] == sid:
+                    p = next((p for p in panes if p["block_id"] == bid), None)
+                    tab = (p["tab"] or p["program"]) if p else ""
+                    return s["label"], tab
+        return sid[-6:], ""
+
+    def jump(self, sid, window_id=None, block_id=None):
+        label, tab = self.names(sid, block_id, window_id)
+        where = f"{label} › {tab}" if tab else label
+        self.say(MUTED, f"→ {where}")
+        threading.Thread(target=self._jump, args=(sid, window_id, block_id, where), daemon=True).start()
+
+    def _jump(self, sid, window_id, block_id, where):
+        """Show the session (and tab) in the app and focus the pane; True on success."""
+        with self.lock:
+            client = self.client
+        if not client:
+            client = app_client()
+        if not client:
+            self.say(COLORS["blocked"], "✗ no Rex app connected")
+            return False
+        args = [f"session_id={sid}"] + ([f"window_id={window_id}"] if window_id else [])
+        code, _, err = run("-C", client, "do", "session.select", *args)
+        if code != 0:
+            self.say(COLORS["blocked"], f"✗ {err or 'session.select failed'}")
+            return False
+        if block_id:
+            code, _, err = run("focus", "-s", sid, block_id)
+            if code != 0:
+                self.say(COLORS["blocked"], f"✗ {err or 'focus failed'}")
+                return False
+            # check the server agrees: the tab is active and the pane focused
+            view = rex("window", "ls", "-s", sid, "--json") or {}
+            win = next((w for w in view.get("windows", []) if w["window_id"] == window_id), {})
+            if view.get("active_window_id") != window_id or win.get("focused_block_id") != block_id:
+                self.say(COLORS["error"], f"? {where}: focus did not stick")
+                return False
+        self.say(COLORS["done"], f"✓ {where}")
+        return True
+
+    def jump_main(self):
+        """Jump to the main switchboard pane, found by find_main and cached."""
+        self.link_at = time.time()
+        self.say(MUTED, "→ main")
+        threading.Thread(target=self._jump_main, daemon=True).start()
+
+    def _jump_main(self):
+        cached = self.main
+        if cached:   # still there, still the main switchboard?
+            sid, _, _, bid = cached
+            blocks = (rex("block", "ls", "-s", sid, "--json") or {}).get("blocks", [])
+            block = next((b for b in blocks if b["block_id"] == bid), None)
+            if block and is_main_board(sid, block):
+                cached = (*cached[:2], block.get("window_id"), bid)   # it may have moved tabs
+            else:
+                cached = None
+        target = cached or find_main()
+        self.main = target
+        if not target:
+            self.say(COLORS["blocked"], "✗ no main switchboard")
+            return
+        sid, label, wid, bid = target
+        if not self._jump(sid, wid, bid, label) and cached:
+            # the cached pane may have just gone; look again once
+            target = self.main = find_main()
+            if not target:
+                self.say(COLORS["blocked"], "✗ no main switchboard")
+                return
+            sid, label, wid, bid = target
+            self._jump(sid, wid, bid, label)
+
+    def link_hot(self):
+        return self.link_hover or time.time() - self.link_at < 0.6
+
+    def on_link(self, x, line):
+        """Whether screen position (x, line), 1-based x, is on the header's main link."""
+        if not self.scope or self.offset + line != 0:
+            return False
+        start, end = main_link_span(shutil.get_terminal_size().columns - 2)
+        return start <= x - 2 < end      # each screen line is drawn after one space
+
+    def activate(self, target):
+        kind, sid, wid, bid = target
+        if kind == "pane":
+            self.selected = bid
+            self.jump(sid, wid, bid)
+        elif kind == "tab":
+            self.selected = self.first_pane_of(wid) or self.selected
+            self.jump(sid, wid)
+        else:
+            self.selected = self.first_pane_of(sid) or self.selected
+            self.jump(sid)
+
+    # input
+    def click(self, x, line, button, release):
+        if button & 32:                              # motion: hover over the main link
+            self.link_hover = self.on_link(x, line)
+            return
+        if release:
+            return
+        if button in (64, 65):                       # wheel
+            self.move(-1 if button == 64 else 1)
+            return
+        if button != 0:
+            return
+        if self.on_link(x, line):
+            if time.time() - self.focus_in >= 0.3:   # see below
+                self.jump_main()
+            return
+        i = self.offset + line
+        target = self.targets[i] if 0 <= i < len(self.targets) else None
+        if not target:
+            return
+        if time.time() - self.focus_in < 0.3:
+            # this click most likely just focused the pane: select, don't jump
+            if target[0] == "pane":
+                self.selected = target[3]
+            return
+        self.activate(target)
+
+    def key(self, k):
+        """Handle one key token; return False to quit."""
+        if k in ("q", "esc", "\x03"):
+            return False
+        if k in ("j", "down"):
+            self.move(1)
+        elif k in ("k", "up"):
+            self.move(-1)
+        elif k in ("J", "tab", "right", "pgdn"):
+            self.hop(1)
+        elif k in ("K", "btab", "left", "pgup"):
+            self.hop(-1)
+        elif k in ("g", "home"):
+            self.edge(False)
+        elif k in ("G", "end"):
+            self.edge(True)
+        elif k in ("\r", "\n", "l", " "):
+            order = dict(self.order())
+            if self.selected in order:
+                with self.lock:
+                    p = next((p for _, ps in self.data for p in ps if p["block_id"] == self.selected), None)
+                if p:
+                    self.jump(p["session_id"], p["window_id"], p["block_id"])
+        elif k in ("0", "~"):
+            if self.scope:
+                self.jump_main()
+        elif k.isdigit():
+            groups = self.groups()
+            n = int(k) - 1
+            if n < len(groups):
+                self.activate(groups[n])
+        return True
+
+
+CSI_KEYS = {"A": "up", "B": "down", "C": "right", "D": "left", "H": "home", "F": "end", "Z": "btab",
+            "5~": "pgup", "6~": "pgdn", "1~": "home", "4~": "end", "7~": "home", "8~": "end"}
+SEQ = re.compile(r"\x1b\[<(\d+);(\d+);(\d+)([Mm])|\x1b\[([0-9;]*)([A-Za-z~])|\x1bO([A-Za-z])")
+
+
+def tokens(buf):
+    """Split raw input into key tokens and mouse/focus events."""
+    out, i = [], 0
+    while i < len(buf):
+        if buf[i] == "\x1b":
+            m = SEQ.match(buf, i)
+            if not m:
+                out.append("esc")
+                i += 1
+                continue
+            if m.group(1):
+                out.append(("mouse", int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4) == "m"))
+            elif m.group(6):
+                params, final = m.group(5), m.group(6)
+                if final == "I":
+                    out.append(("focus", True))
+                elif final == "O":
+                    out.append(("focus", False))
+                else:
+                    name = CSI_KEYS.get(final if final != "~" else params + "~")
+                    if name:
+                        out.append(name)
+            else:
+                name = CSI_KEYS.get(m.group(7))
+                if name:
+                    out.append(name)
+            i = m.end()
+        else:
+            out.append("tab" if buf[i] == "\t" else buf[i])
+            i += 1
+    return out
+
+
+def live(scope=None, scope_label=None):
+    board = Board(scope, scope_label)
+    threading.Thread(target=board.refresh, daemon=True).start()
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd) if os.isatty(fd) else None
+    out = sys.stdout
+    # alt screen, hide cursor, mouse clicks (+ motion, scoped, for the link's
+    # hover) + SGR encoding, focus events
+    motion = "\033[?1003h" if scope else ""
+    out.write(f"\033[?1049h\033[?25l\033[?1000h{motion}\033[?1006h\033[?1004h")
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    try:
+        if saved:
+            tty.setcbreak(fd)
+        tick = 0
+        while True:
+            size = shutil.get_terminal_size()
+            cols, rows = size.columns - 2, max(size.lines - 1, 1)
+            with board.lock:
+                data = board.data
+            if data:
+                hot = board.link_hot()
+                frame, board.targets = render(data, cols, tick, board.selected, scope_label, hot)
+                board.keep_selection()
+                frame, board.targets = render(data, cols, tick, board.selected, scope_label, hot)
+            else:
+                frame, board.targets = [f"{MUTED}loading…{RESET}"], [None]
+            # keep the selected pane (and its detail line) on screen
+            hit = [i for i, t in enumerate(board.targets) if t and t[0] == "pane" and t[3] == board.selected]
+            if hit:
+                if hit[0] < board.offset:
+                    board.offset = max(hit[0] - 1, 0)       # include the card header
+                elif hit[-1] >= board.offset + rows:
+                    board.offset = hit[-1] - rows + 2
+            board.offset = max(0, min(board.offset, max(len(frame) - rows, 0)))
+            view = frame[board.offset: board.offset + rows]
+            if board.status and time.time() - board.status_at > 3:
+                board.status = None
+            out.write("\033[H" + "".join(f" {line}\033[K\n" for line in view) + "\033[J"
+                      + f"\033[{size.lines};1H {footer(cols, board.status, bool(scope))}\033[K")
+            out.flush()
+            tick += 1
+            if not saved:
+                time.sleep(0.12)
+                continue
+            if not select.select([fd], [], [], 0.12)[0]:
+                continue
+            raw = os.read(fd, 4096)
+            if raw.endswith(b"\x1b") and select.select([fd], [], [], 0.03)[0]:
+                raw += os.read(fd, 4096)                    # a split escape sequence
+            going = True
+            for tok in tokens(raw.decode("utf-8", "replace")):
+                if isinstance(tok, tuple):
+                    if tok[0] == "mouse":
+                        _, button, x, y, release = tok
+                        board.click(x, y - 1, button, release)
+                    elif tok[0] == "focus" and tok[1]:
+                        board.focus_in = time.time()
+                    elif tok[0] == "focus":
+                        board.link_hover = False
+                elif not board.key(tok):
+                    going = False
+                    break
+            if not going:
+                break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if saved:
+            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        out.write("\033[?1004l\033[?1006l\033[?1003l\033[?1000l\033[?25h\033[?1049l")
+        out.flush()
+
+
+def main():
+    args = sys.argv[1:]
+    scope = label = None
+    if "--here" in args:
+        scope = os.environ.get("REX_SESSION")
+        if not scope:
+            sys.exit("switchboard: --here needs $REX_SESSION (run it inside a Rex pane)")
+    elif "--session" in args:
+        i = args.index("--session")
+        if i + 1 >= len(args):
+            sys.exit("usage: switchboard --session NAME")
+        scope = args[i + 1]
+    if scope:
+        found = resolve(scope)
+        if not found:
+            sys.exit(f"switchboard: no session '{scope}'")
+        scope, label = found["session_id"], found.get("label") or found["session_id"][-6:]
+    if "--once" in args:
+        print("\n".join(render(snapshot(scope), shutil.get_terminal_size().columns, scope_label=label)[0]))
+    else:
+        live(scope, label)
+
+
+if __name__ == "__main__":
+    main()

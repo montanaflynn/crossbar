@@ -1,0 +1,189 @@
+#!/bin/zsh
+# cbar: crossbar, the Rex agent setup (supervisor, operators, switchboards).
+# Projects are registered in ~/.crossbar/projects/NAME/project.toml; each has
+# a Rex session of the same name with the operator in its first tab.
+emulate -L zsh
+
+CROSSBAR=${CROSSBAR_HOME:-~/.crossbar}
+BIN=${0:A:h}
+REPO=${CROSSBAR_REPO:-https://github.com/montanaflynn/crossbar}
+
+usage() {
+  print "usage: cbar COMMAND
+
+  new NAME [DIR]               register a project and create its Rex session with an
+                               operator and a local switchboard (DIR: the z match)
+  operator                     run the operator Claude in this pane
+  board [--here|--session N]   run the switchboard (--once prints once and exits)
+  ls                           registered projects, their sessions and operators
+  open NAME                    switch the Rex app to that project's session
+  update                       install the latest crossbar from GitHub
+  version                      the installed version
+  help                         this text"
+}
+
+die() { print -u2 "cbar: $*"; exit 1 }
+
+# toml_get FILE KEY: the value of a top-level KEY (strings unquoted)
+toml_get() {
+  local line
+  line=$(grep -m1 "^$2 *= *" $1 2>/dev/null) || return 1
+  line=${line#*=}; line=${line## }
+  if [[ $line == \"*\" ]]; then
+    line=${line#\"}; line=${line%\"}
+    line=${line//\\\"/\"}; line=${line//\\\\/\\}
+  fi
+  print -r -- $line
+}
+
+toml_str() { local s=${1//\\/\\\\}; print -r -- "\"${s//\"/\\\"}\"" }
+
+# register NAME DIR: write projects/NAME/project.toml (keeping its created
+# time if it exists) and make briefs/ and reports/
+register() {
+  local name=$1 dir=${2:A} home=$CROSSBAR/projects/$1 created
+  mkdir -p $home/briefs $home/reports || return 1
+  created=$(toml_get $home/project.toml created) || created=$(date +%Y-%m-%dT%H:%M:%S%z | sed 's/\(..\)$/:\1/')
+  print -r -- "name = $(toml_str $name)
+path = $(toml_str $dir)
+created = $created" >$home/project.toml
+}
+
+session_id() {
+  rex ls --json | jq -r --arg n "$1" '[.sessions[] | select(.label == $n or .session_id == $n)][0].session_id // empty'
+}
+
+# operator_block SESSION: the operator pane, the first non-switchboard pane of tab "operator"
+operator_block() {
+  local wid
+  wid=$(rex window ls -s $1 --json 2>/dev/null | jq -r '[.windows[] | select(.label == "operator")][0].window_id // empty')
+  [[ -n $wid ]] || return 1
+  rex block ls -s $1 --json | jq -r --arg w $wid \
+    '[.blocks[] | select(.window_id == $w and .label != "switchboard" and (.placement // "placed") == "placed")][0].block_id // empty'
+}
+
+# the Rex app to drive: prefer an app attached to our own session (as switchboard does)
+app_client() {
+  rex client ls --json | jq -r --arg me "${REX_SESSION:-}" '
+    [.clients[] | select(.info.kind == "app" and (.connection_state // "connected") == "connected")]
+    | sort_by((.session_ids // []) | index($me) == null) | .[0].client_id // empty'
+}
+
+cmd_new() {
+  local name=$1 dir=$2 block board
+  [[ -z $name ]] && die "usage: cbar new NAME [DIR]"
+  [[ $name == */* ]] && die "project name can't contain '/'"
+  if [[ -z $dir ]]; then
+    source ~/.zshrc >/dev/null 2>&1
+    dir=$(z -e "$name" 2>/dev/null)
+  fi
+  [[ -d $dir ]] || die "no directory for '$name' (pass one)"
+  register $name $dir || die "could not register '$name'"
+
+  if [[ -n $(session_id $name) ]]; then
+    print "session '$name' already exists; registered it ($dir)"
+    return 0
+  fi
+
+  block=$(rex new "$name" -c "$dir" --window operator --json | jq -r '.initial_windows[0].block_ids[0]')
+  [[ -n $block && $block != null ]] || die "could not create session '$name'"
+  sleep 0.5
+  rex send -s "$name" -b "$block" "cbar operator"$'\n'
+
+  # a scoped switchboard (this session's tabs and agents) to the right of the operator
+  board=$(rex split -s "$name" -b "$block" -c "$dir" --split=right --ratio 30 --focus=false \
+    --label switchboard --json | jq -r '.block_ids[0] // empty')
+  [[ -z $board ]] && board=$(rex block ls -s "$name" --json |
+    jq -r '[.blocks[] | select(.label == "switchboard")][0].block_id // empty')
+  if [[ -n $board ]]; then
+    sleep 0.5
+    rex send -s "$name" -b "$board" "cbar board --here"$'\n'
+  else
+    print -u2 "cbar: could not add the switchboard pane"
+  fi
+  print "created session '$name' in $dir with an operator and a switchboard"
+}
+
+cmd_operator() {
+  local project home
+  project=${REX_SESSION:+$(rex ls --json | jq -r --arg id "$REX_SESSION" '.sessions[] | select(.session_id == $id) | .label')}
+  project=${project:-${PWD:t}}
+  home=$CROSSBAR/projects/$project
+  mkdir -p $home/briefs $home/reports
+  exec claude -n "$project operator" --append-system-prompt "$(<$CROSSBAR/operator.md)
+
+Your project is \`$project\`: briefs go in \`${home/#$HOME/~}/briefs/\`, reports in \`${home/#$HOME/~}/reports/\`."
+}
+
+cmd_board() {
+  # the switchboard next to cbar, else the one on PATH
+  [[ -x $BIN/switchboard ]] && exec $BIN/switchboard "$@"
+  exec switchboard "$@"
+}
+
+cmd_ls() {
+  local f name dir sid block st sessions
+  sessions=$(rex ls --json 2>/dev/null)
+  local -a rows=("NAME	PATH	SESSION	OPERATOR")
+  for f in $CROSSBAR/projects/*/project.toml(N); do
+    name=$(toml_get $f name) dir=$(toml_get $f path)
+    sid=$(jq -r --arg n "$name" '[.sessions[]? | select(.label == $n)][0].session_id // empty' <<<$sessions)
+    st=-
+    if [[ -n $sid ]]; then
+      block=$(operator_block $sid)
+      if [[ -n $block ]]; then
+        st=$(rex block call -s $sid -b $block program_status 2>/dev/null | jq -r '.records[0].state // "-"')
+      else
+        st="no operator tab"
+      fi
+    fi
+    rows+=("$name	${dir/#$HOME/~}	${${sid:+running}:-not running}	$st")
+  done
+  (( $#rows > 1 )) || { print "no projects registered (cbar new NAME [DIR])"; return }
+  print -l -- $rows | column -t -s $'\t'
+}
+
+# cbar open [-n] NAME: -n prints the rex command instead of running it
+cmd_open() {
+  local dry= sid client
+  [[ $1 == -n ]] && { dry=1; shift }
+  [[ -z $1 ]] && die "usage: cbar open NAME"
+  sid=$(session_id $1)
+  [[ -n $sid ]] || die "no session '$1' (cbar new $1)"
+  client=$(app_client)
+  [[ -n $client ]] || die "no Rex app connected"
+  local -a cmd=(rex -C $client do session.select session_id=$sid)
+  if [[ -n $dry ]]; then print -r -- "${(q-)cmd[@]}"; else "${cmd[@]}" >/dev/null; fi
+}
+
+cmd_version() {
+  [[ -f $CROSSBAR/version ]] && print -r -- "$(<$CROSSBAR/version)" || print "unknown (not installed by install)"
+}
+
+# cbar update: clone the latest main and run its installer
+cmd_update() {
+  local old new tmp
+  old=$(cmd_version)
+  tmp=$(mktemp -d) || die "no temp dir"
+  if ! git clone -q --depth 1 $REPO $tmp/crossbar; then
+    rm -rf $tmp; die "could not fetch $REPO"
+  fi
+  CROSSBAR_HOME=$CROSSBAR $tmp/crossbar/install >/dev/null
+  local code=$?
+  rm -rf $tmp
+  (( code == 0 )) || die "install failed"
+  new=$(cmd_version)
+  if [[ $old == $new ]]; then print "already up to date: $new"; else print "updated: $old → $new"; fi
+}
+
+case $1 in
+  new) shift; cmd_new "$@" ;;
+  update) shift; cmd_update "$@" ;;
+  version|--version) cmd_version ;;
+  operator) shift; cmd_operator "$@" ;;
+  board) shift; cmd_board "$@" ;;
+  ls) shift; cmd_ls "$@" ;;
+  open) shift; cmd_open "$@" ;;
+  ""|help|-h|--help) usage ;;
+  *) print -u2 "cbar: unknown command '$1'"; usage >&2; exit 1 ;;
+esac

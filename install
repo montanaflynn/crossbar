@@ -1,0 +1,40 @@
+#!/bin/zsh
+# install: install crossbar from this checkout into ~/.crossbar ($CROSSBAR_HOME)
+# and link cbar and switchboard into ~/.local/bin ($CROSSBAR_LINKS).
+# Your data (projects/, central/) is never touched. Files are replaced by
+# rename, so panes running the old copies keep working.
+emulate -L zsh
+
+src=${0:A:h} dest=${CROSSBAR_HOME:-~/.crossbar} links=${CROSSBAR_LINKS:-~/.local/bin}
+version=$(<$src/VERSION)
+commit=$(git -C $src rev-parse --short HEAD 2>/dev/null)
+[[ -n $commit && -n $(git -C $src status --porcelain 2>/dev/null) ]] && commit+=-dirty
+
+for tool in rex jq claude python3; do
+  (( $+commands[$tool] )) || print -u2 "install: warning: $tool is not on PATH"
+done
+
+mkdir -p $dest/bin $dest/central/briefs $dest/central/reports $dest/projects $links || exit 1
+
+# put SRC DST MODE: copy next to DST, then rename over it
+put() {
+  local tmp=$2.install.$$
+  cp $1 $tmp && chmod $3 $tmp && mv -f $tmp $2 || { rm -f $tmp; print -u2 "install: could not write $2"; exit 1 }
+}
+put $src/bin/cbar $dest/bin/cbar 755
+put $src/bin/switchboard $dest/bin/switchboard 755
+put $src/operator.md $dest/operator.md 644
+
+for f in cbar switchboard; do
+  if [[ $(readlink $links/$f) == $dest/bin/$f ]]; then
+    continue
+  elif [[ -e $links/$f && ! -L $links/$f ]]; then
+    print -u2 "install: ${links/#$HOME/~}/$f exists and is not a link; left it alone"
+  else
+    ln -sfn $dest/bin/$f $links/$f
+  fi
+done
+
+print -r -- "$version${commit:+ ($commit)}" >$dest/version
+print "installed crossbar $version${commit:+ ($commit)} in ${dest/#$HOME/~}"
+(( ${path[(Ie)$links]} )) || print "add ${links/#$HOME/~} to your PATH"

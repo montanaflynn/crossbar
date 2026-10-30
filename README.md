@@ -4,10 +4,6 @@
   <img src="assets/crossbar-hero-light.png" alt="Crossbar" width="960">
 </picture>
 
-# crossbar
-
-Run a team of Claude Code agents across projects, in Rex or tmux.
-
 - **Supervisor**: a Claude in the `central` session that coordinates across projects.
 - **Operators**: one per project. Each operator is a Claude in tab 1 (`operator`) of the project's
   session. It plans the work, hands tasks to agents in other tabs, watches them and reports back.

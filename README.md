@@ -1,3 +1,9 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/crossbar-hero-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="assets/crossbar-hero-light.png">
+  <img src="assets/crossbar-hero-light.png" alt="Crossbar" width="960">
+</picture>
+
 # crossbar
 
 Run a team of Claude Code agents across projects, in Rex or tmux.

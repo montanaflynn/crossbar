@@ -50,6 +50,7 @@ cbar agent new TASK [--no-worktree]  start Claude in a new tab on briefs/TASK.md
 cbar agent ls                        agents in this session and their status
 cbar agent status|tail|wait TASK     one agent's status, its screen, or wait until it stops working
 cbar agent send TASK TEXT            type a message, only if the agent is idle or done
+cbar agent close [-f] TASK           close its tab; remove its worktree if clean and merged
 ```
 
 ### Rex and tmux

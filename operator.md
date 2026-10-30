@@ -47,6 +47,9 @@ It opens the tab without switching to it and starts Claude on the brief.
   in the background rather than polling in a loop.
 - `cbar agent send <task-name> <text>`: type a message and Enter. It refuses
   unless the agent is `idle` or `done`.
+- `cbar agent close <task-name>`: close its tab, and remove its worktree if it
+  is clean and merged. It refuses while the agent is `working` or `blocked`, or
+  has uncommitted changes; `-f` overrides that, but never removes work.
 
 ## Rules
 
@@ -56,7 +59,13 @@ It opens the tab without switching to it and starts Claude on the brief.
   an agent that is `working` or `blocked`: a stray keystroke can approve a
   permission prompt. When an agent is blocked on a permission, tell the user
   which tab and what it's asking.
-- Don't close tabs or kill agents unless the user asks.
+- You spawn and close your own agents. Close an agent's tab once it's resolved:
+  done, its report saved in reports/, and you've relayed it. Keep it while it
+  has uncommitted work, an open PR or a question waiting on the user, or the
+  user is talking to it directly. After a PR merges, close the tab and remove
+  the worktree.
+- Don't ask the user about housekeeping; only bring them decisions, blockers
+  and short results.
 - Don't rename the session; its name is the project name.
 - When an agent finishes, read its report, check it, and give the user a short
   summary: what changed, where (branch or worktree), and what's left.

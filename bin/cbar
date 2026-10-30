@@ -36,7 +36,9 @@ agent_usage() {
   status TASK                  one agent's status
   tail TASK [N]                the last N lines of its screen (default 60)
   send TASK TEXT               type TEXT and Enter, only if it is idle or done
-  wait TASK [SECONDS]          wait until it stops working (default 600)"
+  wait TASK [SECONDS]          wait until it stops working (default 600)
+  close [-f] TASK              close its tab, and remove its worktree if clean and merged;
+                               refuses while it works, is blocked or has uncommitted changes"
 }
 
 die() { print -u2 "cbar: $*"; exit 1 }
@@ -445,6 +447,79 @@ agent_wait() {
   print -r -- "$task: ${st:-not running Claude}"
 }
 
+# merged REPO WORKTREE: whether the worktree's work is in REPO's default branch
+# (its commit is), or its branch's PR has merged (a squash merge shows only there)
+merged() {
+  local repo=$1 wt=$2 head base branch
+  head=$(git -C $wt rev-parse HEAD 2>/dev/null) || return 1
+  base=$(git -C $repo symbolic-ref -q --short refs/remotes/origin/HEAD)
+  for b in $base ${base#origin/} main master; do
+    git -C $repo rev-parse -q --verify $b >/dev/null && git -C $repo merge-base --is-ancestor $head $b && return 0
+  done
+  branch=$(git -C $wt symbolic-ref -q --short HEAD) || return 1
+  (( $+commands[gh] )) || return 1
+  [[ $(cd $repo && gh pr view $branch --json state -q .state 2>/dev/null) == MERGED ]]
+}
+
+# cbar agent close [-f] TASK: close the agent's tab, then remove its worktree
+# if it is clean and merged. Refuses an agent that is working or blocked, or
+# has uncommitted changes, unless -f; -f never removes a worktree with work in it.
+agent_close() {
+  local force= task id st wid project repo wt dirty= branch lock pid
+  [[ $1 == -f || $1 == --force ]] && { force=1; shift }
+  task=$1
+  [[ -n $task ]] || die "usage: cbar agent close [-f] TASK"
+  in_session; agent_get $task
+  wid=$(panes --here | jq -r --arg i "$id" 'select(.block_id == $i) | .window_id' | head -1)
+  local mine=${TMUX_PANE:-$REX_BLOCK}
+  [[ -n $(panes --here | jq -r --arg w "$wid" --arg m "$mine" 'select(.window_id == $w and .block_id == $m) | 1') ]] &&
+    die "'$task' is this tab"
+  project=$(here_session)
+  repo=$(toml_get $CROSSBAR/projects/$project/project.toml path) || repo=$PWD
+  wt=$repo/.claude/worktrees/$task
+  [[ -d $wt ]] || wt=
+  [[ -n $wt && -n $(git -C $wt status --porcelain 2>/dev/null) ]] && dirty=1
+  if [[ -z $force ]]; then
+    [[ $st == working || $st == blocked ]] && die "$task is $st; wait for it, or close it anyway with -f"
+    [[ -n $dirty ]] && die "$task has uncommitted changes in ${wt/#$HOME/~}; commit them, or close it anyway with -f"
+  fi
+
+  if [[ $(here_terminal) == tmux ]]; then
+    tm kill-window -t $wid || die "could not close the tab"
+  else
+    rex window close -s $REX_SESSION $wid >/dev/null || die "could not close the tab"
+  fi
+  print "closed $task"
+  [[ -n $wt ]] || return 0
+
+  if [[ -n $dirty ]]; then
+    print "kept ${wt/#$HOME/~}: uncommitted changes"
+    return 0
+  fi
+  branch=$(git -C $wt symbolic-ref -q --short HEAD)
+  if ! merged $repo $wt; then
+    print "kept ${wt/#$HOME/~}: ${branch:-its commit} is not merged"
+    return 0
+  fi
+  # Claude locks its worktree while it runs: wait for it to exit, then the lock is stale
+  lock=$(git -C $repo worktree list --porcelain | awk -v w="worktree $wt" '$0 == w { on = 1; next } /^worktree / { on = 0 } on && /^locked/')
+  pid=${${lock#*\(pid }%% *}
+  if [[ -n $lock ]]; then
+    local tries=0
+    while [[ $pid == <-> ]] && kill -0 $pid 2>/dev/null && (( tries++ < 25 )); do sleep 0.2; done
+    if [[ $pid == <-> ]] && kill -0 $pid 2>/dev/null; then
+      print "kept ${wt/#$HOME/~}: still in use by pid $pid"
+      return 0
+    fi
+    git -C $repo worktree unlock $wt
+  fi
+  git -C $repo worktree remove $wt || { print "kept ${wt/#$HOME/~}: git would not remove it"; return 0 }
+  if [[ -n $branch ]]; then
+    git -C $repo branch -q -d $branch 2>/dev/null || git -C $repo branch -q -D $branch
+  fi
+  print "removed ${wt/#$HOME/~}${branch:+ and branch $branch}"
+}
+
 cmd_agent() {
   local sub=$1
   (( $# )) && shift
@@ -455,6 +530,7 @@ cmd_agent() {
     tail) agent_tail "$@" ;;
     send) agent_send "$@" ;;
     wait) agent_wait "$@" ;;
+    close) agent_close "$@" ;;
     ""|help|-h|--help) agent_usage ;;
     *) print -u2 "cbar: unknown agent command '$sub'"; agent_usage >&2; exit 1 ;;
   esac

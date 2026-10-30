@@ -1,10 +1,9 @@
 # crossbar
 
-Run a team of Claude Code agents across projects in the Rex
-terminal multiplexer.
+Run a team of Claude Code agents across projects, in Rex or tmux.
 
 - **Supervisor**: a Claude in the `central` session that coordinates across projects.
-- **Operators**: one per project. Each operator is a Claude in tab 1 (`operator`) of the project's Rex
+- **Operators**: one per project. Each operator is a Claude in tab 1 (`operator`) of the project's
   session. It plans the work, hands tasks to agents in other tabs, watches them and reports back.
 - **Agents**: Claudes that an operator or the supervisor starts in other tabs,
   each with a brief and a report file.
@@ -14,8 +13,8 @@ terminal multiplexer.
 
 ## Install
 
-Requires zsh, Python 3, [jq](https://jqlang.org), [Claude Code](https://claude.com/claude-code)
-and Rex.
+Requires zsh, Python 3, [jq](https://jqlang.org), [Claude Code](https://claude.com/claude-code),
+and Rex or tmux (3.0+).
 
 ```sh
 git clone https://github.com/montanaflynn/crossbar.git
@@ -33,12 +32,39 @@ cbar version
 ## Use
 
 ```
-cbar new NAME [DIR]               register a project and create its Rex session with an operator
-                                  and a local switchboard (DIR defaults to the `z` match for NAME)
-cbar operator                     run the operator Claude in this pane
-cbar board [--here|--session N]   run the switchboard (--once prints once and exits)
-cbar ls                           registered projects, their sessions and operators
-cbar open NAME                    switch the Rex app to that project's session
+cbar new NAME [DIR] [--tmux|--rex]   register a project and create its session with an operator
+                                     and a local switchboard (DIR defaults to the `z` match for NAME;
+                                     the terminal defaults to the one you're in, else Rex if it's running)
+cbar operator                        run the operator Claude in this pane
+cbar board [--here|--session N]      run the switchboard (--once prints once, --json prints JSON)
+cbar ls                              registered projects, their terminal, sessions and operators
+cbar open NAME                       switch to that project's session (outside tmux: attach to it)
+```
+
+Operators start and watch agents in their own session, the same way in Rex and tmux:
+
+```
+cbar agent new TASK [--no-worktree]  start Claude in a new tab on briefs/TASK.md
+cbar agent ls                        agents in this session and their status
+cbar agent status|tail|wait TASK     one agent's status, its screen, or wait until it stops working
+cbar agent send TASK TEXT            type a message, only if the agent is idle or done
+```
+
+### Rex and tmux
+
+Each project lives in one terminal, recorded in its `project.toml`. A switchboard
+shows every Rex and tmux session together, wherever it runs, and jumps to any pane:
+in Rex it asks the Rex app, in tmux it switches the tmux client.
+
+Rex reports each agent's status itself. In tmux the status comes from `claude agents`,
+matched to panes by process: idle, working and blocked, but no "done" or status message.
+
+To try tmux, from any terminal:
+
+```sh
+cbar new myproject ~/code/myproject --tmux
+cbar open myproject          # attaches; inside tmux, switches to it
+cbar board                   # in another tmux window: the main switchboard
 ```
 
 ## Layout
@@ -49,7 +75,7 @@ cbar open NAME                    switch the Rex app to that project's session
 ├── operator.md                  the operator role prompt
 ├── version
 ├── central/{briefs,reports}/    the supervisor's agents
-└── projects/<name>/             one per project: project.toml (name, path, created),
+└── projects/<name>/             one per project: project.toml (name, path, terminal, created),
                                  briefs/ and reports/
 ```
 

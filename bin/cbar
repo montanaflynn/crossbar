@@ -1,7 +1,8 @@
 #!/bin/zsh
-# cbar: crossbar, the Rex agent setup (supervisor, operators, switchboards).
-# Projects are registered in ~/.crossbar/projects/NAME/project.toml; each has
-# a Rex session of the same name with the operator in its first tab.
+# cbar: crossbar, a team of Claude Code agents in Rex or tmux (supervisor,
+# operators, switchboards). Projects are registered in
+# ~/.crossbar/projects/NAME/project.toml; each has a Rex or tmux session of the
+# same name with the operator in its first tab.
 emulate -L zsh
 
 CROSSBAR=${CROSSBAR_HOME:-~/.crossbar}
@@ -11,15 +12,29 @@ REPO=${CROSSBAR_REPO:-https://github.com/montanaflynn/crossbar}
 usage() {
   print "usage: cbar COMMAND
 
-  new NAME [DIR]               register a project and create its Rex session with an
-                               operator and a local switchboard (DIR: the z match)
+  new NAME [DIR] [--tmux|--rex]  register a project and create its session with an
+                               operator and a local switchboard (DIR: the z match;
+                               terminal: the one you're in, else Rex if it's running)
   operator                     run the operator Claude in this pane
   board [--here|--session N]   run the switchboard (--once prints once and exits)
   ls                           registered projects, their sessions and operators
-  open NAME                    switch the Rex app to that project's session
+  open NAME                    switch to that project's session
+  agent ...                    start and watch agents in this session (cbar agent help)
   update                       install the latest crossbar from GitHub
   version                      the installed version
   help                         this text"
+}
+
+agent_usage() {
+  print "usage: cbar agent COMMAND    (acts on this pane's session)
+
+  new TASK [--no-worktree]     start Claude in a new tab TASK on the brief
+                               ~/.crossbar/projects/<project>/briefs/TASK.md
+  ls                           this session's agents and their status
+  status TASK                  one agent's status
+  tail TASK [N]                the last N lines of its screen (default 60)
+  send TASK TEXT               type TEXT and Enter, only if it is idle or done
+  wait TASK [SECONDS]          wait until it stops working (default 600)"
 }
 
 die() { print -u2 "cbar: $*"; exit 1 }
@@ -38,28 +53,47 @@ toml_get() {
 
 toml_str() { local s=${1//\\/\\\\}; print -r -- "\"${s//\"/\\\"}\"" }
 
-# register NAME DIR: write projects/NAME/project.toml (keeping its created
-# time if it exists) and make briefs/ and reports/
+# register NAME DIR TERMINAL: write projects/NAME/project.toml (keeping its
+# created time if it exists) and make briefs/ and reports/
 register() {
   local name=$1 dir=${2:A} home=$CROSSBAR/projects/$1 created
   mkdir -p $home/briefs $home/reports || return 1
   created=$(toml_get $home/project.toml created) || created=$(date +%Y-%m-%dT%H:%M:%S%z | sed 's/\(..\)$/:\1/')
   print -r -- "name = $(toml_str $name)
 path = $(toml_str $dir)
+terminal = $(toml_str $3)
 created = $created" >$home/project.toml
 }
 
-session_id() {
-  rex ls --json | jq -r --arg n "$1" '[.sessions[] | select(.label == $n or .session_id == $n)][0].session_id // empty'
+# tmux, on $CROSSBAR_TMUX_SOCKET's server if set (tmux -L)
+tm() { tmux ${CROSSBAR_TMUX_SOCKET:+-L} $CROSSBAR_TMUX_SOCKET "$@" }
+
+# the terminal this pane runs in: tmux, rex or nothing
+here_terminal() {
+  if [[ -n $TMUX_PANE ]]; then print tmux
+  elif [[ -n $REX_SESSION ]]; then print rex
+  fi
 }
 
-# operator_block SESSION: the operator pane, the first non-switchboard pane of tab "operator"
-operator_block() {
-  local wid
-  wid=$(rex window ls -s $1 --json 2>/dev/null | jq -r '[.windows[] | select(.label == "operator")][0].window_id // empty')
-  [[ -n $wid ]] || return 1
-  rex block ls -s $1 --json | jq -r --arg w $wid \
-    '[.blocks[] | select(.window_id == $w and .label != "switchboard" and (.placement // "placed") == "placed")][0].block_id // empty'
+# this pane's session name
+here_session() {
+  case $(here_terminal) in
+    tmux) tm display-message -p -t $TMUX_PANE '#{session_name}' ;;
+    rex) rex ls --json | jq -r --arg id "$REX_SESSION" '.sessions[] | select(.session_id == $id) | .label' ;;
+  esac
+}
+
+rex_session_id() {
+  rex ls --json 2>/dev/null | jq -r --arg n "$1" '[.sessions[] | select(.label == $n or .session_id == $n)][0].session_id // empty'
+}
+
+tmux_has() { tm has-session -t "=$1" 2>/dev/null }
+
+# panes [--here|--session N]: one JSON object per pane, from the switchboard,
+# with mux (rex or tmux) and group (the session, or scoped, the tab)
+panes() {
+  $BIN/switchboard --json "$@" |
+    jq -c '.[] | .group as $g | .panes[] | . + {mux: ($g.mux // "rex"), group: $g.label}'
 }
 
 # the Rex app to drive: prefer an app attached to our own session (as switchboard does)
@@ -70,17 +104,36 @@ app_client() {
 }
 
 cmd_new() {
-  local name=$1 dir=$2 block board
-  [[ -z $name ]] && die "usage: cbar new NAME [DIR]"
+  local name dir term
+  local -a pos
+  while (( $# )); do
+    case $1 in
+      --tmux) term=tmux ;;
+      --rex) term=rex ;;
+      -*) die "unknown option '$1'" ;;
+      *) pos+=($1) ;;
+    esac
+    shift
+  done
+  name=$pos[1] dir=$pos[2]
+  [[ -z $name ]] && die "usage: cbar new NAME [DIR] [--tmux|--rex]"
   [[ $name == */* ]] && die "project name can't contain '/'"
+  [[ -z $term ]] && term=$(here_terminal)
+  if [[ -z $term ]]; then
+    rex ls --json >/dev/null 2>&1 && term=rex || term=tmux
+  fi
   if [[ -z $dir ]]; then
     source ~/.zshrc >/dev/null 2>&1
     dir=$(z -e "$name" 2>/dev/null)
   fi
   [[ -d $dir ]] || die "no directory for '$name' (pass one)"
-  register $name $dir || die "could not register '$name'"
+  register $name $dir $term || die "could not register '$name'"
+  new_$term $name $dir
+}
 
-  if [[ -n $(session_id $name) ]]; then
+new_rex() {
+  local name=$1 dir=$2 block board
+  if [[ -n $(rex_session_id $name) ]]; then
     print "session '$name' already exists; registered it ($dir)"
     return 0
   fi
@@ -104,9 +157,32 @@ cmd_new() {
   print "created session '$name' in $dir with an operator and a switchboard"
 }
 
+new_tmux() {
+  local name=$1 dir=$2 pane board
+  if tmux_has $name; then
+    print "session '$name' already exists; registered it ($dir)"
+    return 0
+  fi
+
+  pane=$(tm new-session -d -s $name -c $dir -n operator -x 200 -y 50 -P -F '#{pane_id}') ||
+    die "could not create session '$name'"
+  tm send-keys -t $pane "cbar operator" Enter
+
+  # a scoped switchboard (this session's tabs and agents) to the right of the operator
+  board=$(tm split-window -h -d -l 30% -t $pane -c $dir -P -F '#{pane_id}')
+  if [[ -n $board ]]; then
+    tm set-option -p -t $board @cbar_label switchboard
+    tm send-keys -t $board "cbar board --here" Enter
+  else
+    print -u2 "cbar: could not add the switchboard pane"
+  fi
+  print "created session '$name' in $dir with an operator and a switchboard (tmux)"
+  if [[ -n $TMUX ]]; then print "switch to it: cbar open $name"; else print "attach: cbar open $name"; fi
+}
+
 cmd_operator() {
   local project home
-  project=${REX_SESSION:+$(rex ls --json | jq -r --arg id "$REX_SESSION" '.sessions[] | select(.session_id == $id) | .label')}
+  project=$(here_session 2>/dev/null)
   project=${project:-${PWD:t}}
   home=$CROSSBAR/projects/$project
   mkdir -p $home/briefs $home/reports
@@ -122,38 +198,51 @@ cmd_board() {
 }
 
 cmd_ls() {
-  local f name dir sid block st sessions
-  sessions=$(rex ls --json 2>/dev/null)
-  local -a rows=("NAME	PATH	SESSION	OPERATOR")
+  local f name dir term all running st
+  all=$(panes 2>/dev/null)
+  local -a rows=("NAME	TERMINAL	PATH	SESSION	OPERATOR")
   for f in $CROSSBAR/projects/*/project.toml(N); do
     name=$(toml_get $f name) dir=$(toml_get $f path)
-    sid=$(jq -r --arg n "$name" '[.sessions[]? | select(.label == $n)][0].session_id // empty' <<<$sessions)
+    term=$(toml_get $f terminal) || term=rex
+    running=$(jq -r --arg n "$name" --arg t "$term" 'select(.group == $n and .mux == $t) | .block_id' <<<$all | head -1)
     st=-
-    if [[ -n $sid ]]; then
-      block=$(operator_block $sid)
-      if [[ -n $block ]]; then
-        st=$(rex block call -s $sid -b $block program_status 2>/dev/null | jq -r '.records[0].state // "-"')
-      else
+    if [[ -n $running ]]; then
+      st=$(jq -r --arg n "$name" --arg t "$term" \
+        'select(.group == $n and .mux == $t and .tab == "operator" and .label != "switchboard") | .state' <<<$all | head -1)
+      [[ -z $(jq -r --arg n "$name" --arg t "$term" 'select(.group == $n and .mux == $t and .tab == "operator") | 1' <<<$all) ]] &&
         st="no operator tab"
-      fi
+      st=${st:--}
     fi
-    rows+=("$name	${dir/#$HOME/~}	${${sid:+running}:-not running}	$st")
+    rows+=("$name	$term	${dir/#$HOME/~}	${${running:+running}:-not running}	$st")
   done
   (( $#rows > 1 )) || { print "no projects registered (cbar new NAME [DIR])"; return }
   print -l -- $rows | column -t -s $'\t'
 }
 
-# cbar open [-n] NAME: -n prints the rex command instead of running it
+# cbar open [-n] NAME: -n prints the command instead of running it. tmux:
+# switch this client inside tmux, else attach in this terminal.
 cmd_open() {
-  local dry= sid client
+  local dry= name term sid client
   [[ $1 == -n ]] && { dry=1; shift }
-  [[ -z $1 ]] && die "usage: cbar open NAME"
-  sid=$(session_id $1)
-  [[ -n $sid ]] || die "no session '$1' (cbar new $1)"
-  client=$(app_client)
-  [[ -n $client ]] || die "no Rex app connected"
-  local -a cmd=(rex -C $client do session.select session_id=$sid)
-  if [[ -n $dry ]]; then print -r -- "${(q-)cmd[@]}"; else "${cmd[@]}" >/dev/null; fi
+  name=$1
+  [[ -z $name ]] && die "usage: cbar open NAME"
+  term=$(toml_get $CROSSBAR/projects/$name/project.toml terminal 2>/dev/null)
+  if [[ -z $term ]]; then
+    if tmux_has $name; then term=tmux; else term=rex; fi
+  fi
+  local -a cmd
+  if [[ $term == tmux ]]; then
+    tmux_has $name || die "no tmux session '$name' (cbar new $name --tmux)"
+    cmd=(tmux ${CROSSBAR_TMUX_SOCKET:+-L} $CROSSBAR_TMUX_SOCKET)
+    if [[ -n $TMUX ]]; then cmd+=(switch-client -t "=$name"); else cmd+=(attach-session -t "=$name"); fi
+  else
+    sid=$(rex_session_id $name)
+    [[ -n $sid ]] || die "no session '$name' (cbar new $name)"
+    client=$(app_client)
+    [[ -n $client ]] || die "no Rex app connected"
+    cmd=(rex -C $client do session.select session_id=$sid)
+  fi
+  if [[ -n $dry ]]; then print -r -- "${(q-)cmd[@]}"; elif [[ $term == tmux ]]; then exec "${cmd[@]}"; else "${cmd[@]}" >/dev/null; fi
 }
 
 cmd_version() {
@@ -176,14 +265,149 @@ cmd_update() {
   if [[ $old == $new ]]; then print "already up to date: $new"; else print "updated: $old → $new"; fi
 }
 
+# agents: tabs of this pane's session, found by tab name
+
+in_session() { [[ -n $(here_terminal) ]] || die "run this inside a project's tmux or Rex pane" }
+
+# agent_find TASK: "<pane id>\t<state>" of the agent in tab TASK of this session
+agent_find() {
+  panes --here | jq -r --arg t "$1" 'select(.tab == $t and .label != "switchboard") | "\(.block_id)\t\(.state)"' | head -1
+}
+
+# agent_get TASK: set id and st for the agent in tab TASK, or die
+agent_get() {
+  local found
+  found=$(agent_find $1)
+  [[ -n $found ]] || die "no tab '$1' in this session (cbar agent ls)"
+  id=${found%%$'\t'*} st=${found#*$'\t'}
+}
+
+agent_new() {
+  local task wt=1 project home brief dir id line
+  while (( $# )); do
+    case $1 in
+      --no-worktree) wt= ;;
+      -*) die "unknown option '$1'" ;;
+      *) task=$1 ;;
+    esac
+    shift
+  done
+  [[ -n $task ]] || die "usage: cbar agent new TASK [--no-worktree]"
+  [[ $task =~ '^[A-Za-z0-9._-]+$' ]] || die "a task name is letters, digits, '.', '_' and '-'"
+  in_session
+  project=$(here_session) home=$CROSSBAR/projects/$project brief=$CROSSBAR/projects/$project/briefs/$task.md
+  [[ -f $brief ]] || die "write the brief first: ${brief/#$HOME/~}"
+  [[ -z $(agent_find $task) ]] || die "this session already has a tab '$task'"
+  dir=$(toml_get $home/project.toml path) || dir=$PWD
+
+  local -a cmd=(claude -n $task)
+  [[ -n $wt ]] && cmd+=(-w $task)
+  cmd+=("Read $brief and do the task it describes.")
+  line=${(j: :)${(q)cmd}}
+  case $(here_terminal) in
+    tmux)
+      id=$(tm new-window -d -t "$(tm display-message -p -t $TMUX_PANE '#{session_id}'):" -n $task -c $dir \
+        -P -F '#{pane_id}') || die "could not open a tab"
+      tm send-keys -t $id -l -- $line
+      tm send-keys -t $id Enter
+      ;;
+    rex)
+      id=$(rex window new -s $REX_SESSION $task -c $dir --focus=false --json |
+        jq -r '.block_ids[0] // .blocks[0].block_id // empty')
+      [[ -n $id ]] || die "could not open a tab"
+      sleep 0.5
+      rex send -s $REX_SESSION -b $id "$line"$'\n'
+      ;;
+  esac
+  print "started $task in a new tab ($id)"
+}
+
+agent_ls() {
+  in_session
+  panes --here | jq -r 'select(.state != "") | "\(.tab)\t\(.state)\t\(.since)\t\(.msg)"' |
+    awk -F'\t' 'BEGIN { printf "%-20s %-8s %-5s %s\n", "TAB", "STATE", "SINCE", "MESSAGE" }
+                { printf "%-20s %-8s %-5s %s\n", $1, $2, $3, $4 }'
+}
+
+agent_status() {
+  local id st
+  [[ -n $1 ]] || die "usage: cbar agent status TASK"
+  in_session; agent_get $1
+  print -r -- ${st:-none}
+}
+
+agent_tail() {
+  local id st n=${2:-60}
+  [[ -n $1 ]] || die "usage: cbar agent tail TASK [N]"
+  in_session; agent_get $1
+  if [[ $(here_terminal) == tmux ]]; then
+    tm capture-pane -p -J -t $id -S -$n
+  else
+    rex capture -s $REX_SESSION -b $id
+  fi | awk '{ line[NR] = $0 } /[^ \t]/ { last = NR } END { for (i = 1; i <= last; i++) print line[i] }' | tail -n $n
+}
+
+# Only type into an agent that is idle or done: a keystroke into one that is
+# working or blocked can answer a permission prompt.
+agent_send() {
+  local id st task=$1
+  shift
+  [[ -n $task && -n $* ]] || die "usage: cbar agent send TASK TEXT"
+  in_session; agent_get $task
+  [[ $st == idle || $st == done ]] || die "$task is ${st:-not running Claude}; only type into an idle or done agent"
+  if [[ $(here_terminal) == tmux ]]; then
+    tm send-keys -t $id -l -- "$*"
+    tm send-keys -t $id Enter
+  else
+    rex send -s $REX_SESSION -b $id "$*"$'\r'
+  fi
+}
+
+agent_wait() {
+  local id st task=$1 limit=${2:-600} start=$SECONDS
+  [[ -n $task ]] || die "usage: cbar agent wait TASK [SECONDS]"
+  in_session; agent_get $task
+  # an agent just started has no state until Claude is up (give it a minute),
+  # and can look idle for a moment before it takes up its prompt (look twice)
+  local twice=
+  while :; do
+    while [[ $st == working ]] || { [[ -z $st ]] && (( SECONDS - start < 60 )) }; do
+      (( SECONDS - start >= limit )) && { print -r -- "$task: still ${st:-starting} after ${limit}s"; return 2 }
+      sleep 3
+      agent_get $task
+    done
+    [[ -n $twice || -z $st ]] && break
+    twice=1
+    sleep 5
+    agent_get $task
+  done
+  print -r -- "$task: ${st:-not running Claude}"
+}
+
+cmd_agent() {
+  local sub=$1
+  (( $# )) && shift
+  case $sub in
+    new) agent_new "$@" ;;
+    ls) agent_ls ;;
+    status) agent_status "$@" ;;
+    tail) agent_tail "$@" ;;
+    send) agent_send "$@" ;;
+    wait) agent_wait "$@" ;;
+    ""|help|-h|--help) agent_usage ;;
+    *) print -u2 "cbar: unknown agent command '$sub'"; agent_usage >&2; exit 1 ;;
+  esac
+}
+
 case $1 in
   new) shift; cmd_new "$@" ;;
-  update) shift; cmd_update "$@" ;;
-  version|--version) cmd_version ;;
   operator) shift; cmd_operator "$@" ;;
   board) shift; cmd_board "$@" ;;
   ls) shift; cmd_ls "$@" ;;
   open) shift; cmd_open "$@" ;;
+  agent) shift; cmd_agent "$@" ;;
+  update) shift; cmd_update "$@" ;;
+  version|--version) cmd_version ;;
   ""|help|-h|--help) usage ;;
   *) print -u2 "cbar: unknown command '$1'"; usage >&2; exit 1 ;;
 esac

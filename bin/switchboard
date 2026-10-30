@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""switchboard: live overview of every Rex session (one per project), and a way to jump to any pane.
+"""switchboard: live overview of every Rex and tmux session (one per project), and a way to jump to any pane.
 
 Each session is a card; each pane a row with its tab name, program status
-(idle / working / done / blocked / error, as reported via OSC 7501) and how
-long it has been in that state.
+(idle / working / done / blocked / error) and how long it has been in that
+state. Rex reports status via OSC 7501; in tmux it comes from `claude agents`,
+matched to a pane by process.
 
   switchboard                 live view of every session
   switchboard --session NAME  live view of one session: a card per tab
-  switchboard --here          same, for this pane's session ($REX_SESSION)
+  switchboard --here          same, for this pane's session ($TMUX_PANE or $REX_SESSION)
   switchboard --once          print once and exit (combines with the above)
+  switchboard --json          print the panes as JSON and exit (combines with the above)
+
+$CROSSBAR_TMUX_SOCKET names a tmux server other than the default (tmux -L).
 
 Keys:  j/k ↑/↓ select · J/K tab/shift-tab next/prev session · g/G first/last
        enter jump to pane · 1-9 jump to session N · q/esc quit
@@ -20,6 +24,8 @@ Mouse: click a row to jump to that pane, click a card header to jump to that
 
 Jumping asks the Rex app (a client) to show the session and tab with the
 client action session.select, then focuses the pane with session.focus_block.
+In tmux it selects the window and pane and switches this client (or, outside
+tmux, the most recently active one) to the session.
 """
 import base64
 import json
@@ -41,6 +47,9 @@ from datetime import datetime, timezone
 HOME = os.path.expanduser("~")
 ME = os.getpid()
 MY_BLOCK = os.environ.get("REX_BLOCK", "")
+MY_PANE = os.environ.get("TMUX_PANE", "")
+TMUX_SOCKET = os.environ.get("CROSSBAR_TMUX_SOCKET", "")
+HIDE = {MY_BLOCK, MY_PANE} - {""}   # our own pane; --json shows it
 
 
 def rgb(hex_, bg=False):
@@ -72,6 +81,8 @@ def run(*args):
         return out.returncode, out.stdout, out.stderr.strip()
     except subprocess.TimeoutExpired:
         return 1, "", "timed out"
+    except FileNotFoundError:
+        return 1, "", "rex is not installed"
 
 
 def rex(*args):
@@ -112,7 +123,7 @@ def age(stamp):
 
 def pane(session_id, block, tabs):
     bid = block["block_id"]
-    if bid == MY_BLOCK:
+    if bid in HIDE:
         return None
     proc = rex("block", "call", "-s", session_id, "-b", bid, "process") or {}
     fg = proc.get("foreground") or {}
@@ -139,14 +150,20 @@ def pane(session_id, block, tabs):
 
 
 def resolve(name):
-    """A session id for NAME, a session label or id; None if there is none."""
+    """The session NAME (a label or id), Rex or tmux; None if there is none.
+    A name in both is taken from the one this pane runs in."""
     sessions = (rex("ls", "--json") or {}).get("sessions", [])
-    return next((s for s in sessions if name in (s["session_id"], s.get("label"))), None)
+    pool = tmux_sessions() + sessions if MY_PANE else sessions + tmux_sessions()
+    return next((s for s in pool if name in (s["session_id"], s.get("label"))), None)
 
 
 def snapshot(scope=None):
     if scope:
-        return tabs_snapshot(scope)
+        return tmux_snapshot(scope) if is_tmux(scope) else tabs_snapshot(scope)
+    return rex_snapshot() + tmux_snapshot()
+
+
+def rex_snapshot():
     sessions = (rex("ls", "--json") or {}).get("sessions", [])
     jobs = []
     with ThreadPoolExecutor(max_workers=16) as pool:
@@ -177,14 +194,13 @@ def tabs_snapshot(sid):
 def is_main_board(sid, block):
     """Whether BLOCK runs the main switchboard: labelled switchboard, its
     foreground process the switchboard script, with no --here/--session.
-    Rex reports argv0 only, so the rest of argv comes from ps (same host)."""
+    Rex reports argv0 only (for a script, often just the interpreter), so argv
+    comes from ps (same host)."""
     if block.get("label") != "switchboard" or block.get("placement", "placed") != "placed":
         return False
     if block["block_id"] == MY_BLOCK:
         return False
     fg = (rex("block", "call", "-s", sid, "-b", block["block_id"], "process") or {}).get("foreground") or {}
-    if os.path.basename(fg.get("script") or fg.get("argv0") or fg.get("name") or "") != "switchboard":
-        return False
     try:
         argv = subprocess.run(["ps", "-o", "args=", "-p", str(fg["pid"])],
                               capture_output=True, text=True, timeout=5).stdout.split()
@@ -198,7 +214,16 @@ def is_main_board(sid, block):
 
 def find_main(prefer=None):
     """(session id, session label, window id, block id) of the main switchboard,
-    or None. Sessions are searched in order, PREFER (a session id) first."""
+    or None. Sessions are searched in order, PREFER (a session id) first; the
+    terminal this pane runs in (tmux or Rex) before the other."""
+    for look in (tmux_find_main, rex_find_main) if MY_PANE else (rex_find_main, tmux_find_main):
+        hit = look(prefer)
+        if hit:
+            return hit
+    return None
+
+
+def rex_find_main(prefer=None):
     sessions = (rex("ls", "--json") or {}).get("sessions", [])
     sessions.sort(key=lambda s: s["session_id"] != prefer)
     for s in sessions:
@@ -208,6 +233,161 @@ def find_main(prefer=None):
             if is_main_board(sid, b):
                 return sid, s.get("label") or sid[-6:], b.get("window_id"), b["block_id"]
     return None
+
+
+def main_window(sid, bid):
+    """The window BID is in if it still runs the main switchboard, else None."""
+    if is_tmux(bid):
+        code, out, _ = tmux("display-message", "-p", "-t", bid, "#{@cbar_role}\t#{window_id}")
+        role, _, wid = out.strip().partition("\t")
+        return wid if code == 0 and role == "main" and bid not in HIDE else None
+    blocks = (rex("block", "ls", "-s", sid, "--json") or {}).get("blocks", [])
+    block = next((b for b in blocks if b["block_id"] == bid), None)
+    return block.get("window_id") if block and is_main_board(sid, block) else None
+
+
+# tmux: one list-panes call per refresh. Agent status comes from `claude
+# agents`, each Claude matched to the pane whose process it descends from.
+# Switchboards mark their own pane with @cbar_role (main or local); cbar labels
+# panes it makes with @cbar_label.
+TMUX_FIELDS = ("session_id", "session_name", "window_id", "window_name", "pane_id",
+               "pane_pid", "pane_current_command", "pane_current_path", "@cbar_label", "@cbar_role")
+CLAUDE_STATES = {"busy": "working", "waiting": "blocked", "idle": "idle"}
+SINCE = {}   # pane id → (state, when it was first seen in that state)
+
+
+def tmux(*args):
+    cmd = ["tmux", *(["-L", TMUX_SOCKET] if TMUX_SOCKET else []), *args]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        return out.returncode, out.stdout, out.stderr.strip()
+    except subprocess.TimeoutExpired:
+        return 1, "", "timed out"
+    except FileNotFoundError:
+        return 1, "", "tmux is not installed"
+
+
+def is_tmux(id_):
+    return (id_ or "")[:1] in ("$", "@", "%")
+
+
+def tmux_sessions():
+    code, out, _ = tmux("list-sessions", "-F", "#{session_id}\t#{session_name}")
+    if code != 0:
+        return []
+    return [{"session_id": i, "label": n, "mux": "tmux"}
+            for i, _, n in (line.partition("\t") for line in out.splitlines())]
+
+
+def tmux_rows():
+    code, out, _ = tmux("list-panes", "-a", "-F", "\t".join("#{%s}" % f for f in TMUX_FIELDS))
+    if code != 0:
+        return []
+    rows = [line.split("\t") for line in out.splitlines()]
+    return [dict(zip(TMUX_FIELDS, r)) for r in rows if len(r) == len(TMUX_FIELDS)]
+
+
+def claude_by_pane(pane_pids):
+    """{pane pid: Claude session from `claude agents`} for panes running Claude."""
+    try:
+        sessions = json.loads(subprocess.run(["claude", "agents", "--json"], capture_output=True,
+                                             text=True, timeout=5).stdout or "[]")
+        ps = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True,
+                            text=True, timeout=5).stdout
+    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
+        return {}
+    parent = {}
+    for line in ps.splitlines():
+        pid, _, ppid = line.strip().partition(" ")
+        if pid.isdigit() and ppid.strip().isdigit():
+            parent[int(pid)] = int(ppid)
+    found = {}
+    for s in sessions:
+        pid, hops = s.get("pid"), 0
+        while pid and pid not in pane_pids and hops < 16:
+            pid, hops = parent.get(pid), hops + 1
+        if pid in pane_pids:
+            found.setdefault(pid, s)
+    return found
+
+
+def tmux_pane(row, claude):
+    if row["pane_id"] in HIDE:
+        return None
+    s = claude.get(int(row["pane_pid"]) if row["pane_pid"].isdigit() else 0)
+    state = ""
+    if s:
+        state = s["state"] if s.get("state") in ORDER else CLAUDE_STATES.get(s.get("status"), "")
+    seen = SINCE.get(row["pane_id"])
+    if not seen or seen[0] != state:
+        seen = SINCE[row["pane_id"]] = (state, datetime.now(timezone.utc).isoformat() if seen else "")
+    role = row["@cbar_role"]
+    return {
+        "session_id": row["session_id"],
+        "block_id": row["pane_id"],
+        "window_id": row["window_id"],
+        "tab": row["window_name"],
+        "label": row["@cbar_label"] or ("switchboard" if role else "shell"),
+        "program": "claude" if s else ("switchboard" if role else row["pane_current_command"]),
+        "cwd": short(row["pane_current_path"]),
+        "state": state,
+        "kind": "",
+        "msg": "",
+        "since": age(seen[1]),
+    }
+
+
+def tmux_snapshot(scope=None):
+    """Like rex_snapshot, or with SCOPE (a session id) like tabs_snapshot."""
+    rows = tmux_rows()
+    claude = claude_by_pane({int(r["pane_pid"]) for r in rows if r["pane_pid"].isdigit()})
+    sessions, windows = {}, {}
+    for r in rows:
+        sessions.setdefault(r["session_id"], {"session_id": r["session_id"],
+                                              "label": r["session_name"], "mux": "tmux"})
+        windows.setdefault(r["window_id"], {"window_id": r["window_id"], "label": r["window_name"],
+                                            "session_id": r["session_id"], "mux": "tmux"})
+    panes = [(r, tmux_pane(r, claude)) for r in rows]
+    if scope:
+        return [(w, [p for r, p in panes if p and r["window_id"] == wid])
+                for wid, w in windows.items() if w["session_id"] == scope]
+    return [(s, [p for r, p in panes if p and r["session_id"] == sid]) for sid, s in sessions.items()]
+
+
+def tmux_find_main(prefer=None):
+    rows = [r for r in tmux_rows() if r["@cbar_role"] == "main" and r["pane_id"] not in HIDE]
+    rows.sort(key=lambda r: r["session_id"] != prefer)
+    if not rows:
+        return None
+    r = rows[0]
+    return r["session_id"], r["session_name"], r["window_id"], r["pane_id"]
+
+
+def tmux_here():
+    """This pane's tmux session id, or None outside tmux."""
+    if not MY_PANE:
+        return None
+    code, out, _ = tmux("display-message", "-p", "-t", MY_PANE, "#{session_id}")
+    return out.strip() if code == 0 and out.strip() else None
+
+
+def tmux_jump(sid, window_id, block_id):
+    """Show SID (and the tab, and the pane) in a tmux client: this one inside
+    tmux, else the most recently active. Returns an error or None."""
+    client = []
+    if not MY_PANE:
+        code, out, _ = tmux("list-clients", "-F", "#{client_activity}\t#{client_name}")
+        clients = sorted((line.split("\t") for line in out.splitlines() if "\t" in line), reverse=True)
+        if not clients:
+            return "no tmux client attached (tmux attach)"
+        client = ["-c", clients[0][1]]
+    args = []
+    if window_id:
+        args += ["select-window", "-t", window_id, ";"]
+    if block_id:
+        args += ["select-pane", "-t", block_id, ";"]
+    code, _, err = tmux(*args, "switch-client", *client, "-t", block_id or window_id or sid)
+    return None if code == 0 else (err or "switch-client failed")
 
 
 def app_client():
@@ -252,11 +432,12 @@ def card(number, session, panes, cols, tick, selected, scoped=False):
     head_target = ("tab", sid, session["window_id"], None) if scoped else ("session", sid, None, None)
 
     num = f"{number} " if number <= 9 else ""
-    title = f" {num}{session['label']} "
+    tag = " tmux" if session.get("mux") == "tmux" and not scoped else ""
+    title = f" {num}{session['label']}{tag} "
     path = fit(home, max(inner - len(title) - 4, 0))
     path_part = f" {path} " if path else ""
     rule = "─" * max(cols - 3 - len(title) - len(path_part) - 1, 1)
-    lines = [f"{edge}╭─{RESET} {MUTED}{num}{RESET}{BOLD}{FG}{session['label']}{RESET} "
+    lines = [f"{edge}╭─{RESET} {MUTED}{num}{RESET}{BOLD}{FG}{session['label']}{RESET}{DIM}{tag}{RESET} "
              f"{edge}{rule}{RESET}{MUTED}{path_part}{RESET}{edge}─╮{RESET}"]
     targets = [head_target]
 
@@ -482,6 +663,13 @@ class Board:
 
     def _jump(self, sid, window_id, block_id, where):
         """Show the session (and tab) in the app and focus the pane; True on success."""
+        if is_tmux(sid):
+            err = tmux_jump(sid, window_id, block_id)
+            if err:
+                self.say(COLORS["blocked"], f"✗ {err}")
+                return False
+            self.say(COLORS["done"], f"✓ {where}")
+            return True
         with self.lock:
             client = self.client
         if not client:
@@ -518,12 +706,8 @@ class Board:
         cached = self.main
         if cached:   # still there, still the main switchboard?
             sid, _, _, bid = cached
-            blocks = (rex("block", "ls", "-s", sid, "--json") or {}).get("blocks", [])
-            block = next((b for b in blocks if b["block_id"] == bid), None)
-            if block and is_main_board(sid, block):
-                cached = (*cached[:2], block.get("window_id"), bid)   # it may have moved tabs
-            else:
-                cached = None
+            wid = main_window(sid, bid)
+            cached = (*cached[:2], wid, bid) if wid else None   # it may have moved tabs
         target = cached or find_main()
         self.main = target
         if not target:
@@ -737,10 +921,12 @@ def live(scope=None, scope_label=None):
 def main():
     args = sys.argv[1:]
     scope = label = None
+    if "--json" in args:
+        HIDE.clear()
     if "--here" in args:
-        scope = os.environ.get("REX_SESSION")
+        scope = tmux_here() or os.environ.get("REX_SESSION")
         if not scope:
-            sys.exit("switchboard: --here needs $REX_SESSION (run it inside a Rex pane)")
+            sys.exit("switchboard: --here needs a tmux or Rex pane")
     elif "--session" in args:
         i = args.index("--session")
         if i + 1 >= len(args):
@@ -751,10 +937,19 @@ def main():
         if not found:
             sys.exit(f"switchboard: no session '{scope}'")
         scope, label = found["session_id"], found.get("label") or found["session_id"][-6:]
-    if "--once" in args:
+    if "--json" in args:
+        print(json.dumps([{"group": g, "panes": panes} for g, panes in snapshot(scope)], indent=1))
+    elif "--once" in args:
         print("\n".join(render(snapshot(scope), shutil.get_terminal_size().columns, scope_label=label)[0]))
     else:
-        live(scope, label)
+        # in tmux, mark this pane so others can find the main switchboard
+        marked = MY_PANE and tmux("set-option", "-p", "-t", MY_PANE, "@cbar_role",
+                                  "local" if scope else "main")[0] == 0
+        try:
+            live(scope, label)
+        finally:
+            if marked:
+                tmux("set-option", "-p", "-u", "-t", MY_PANE, "@cbar_role")
 
 
 if __name__ == "__main__":

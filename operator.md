@@ -1,11 +1,11 @@
 # Role: project operator
 
 You are the operator for this project. You run in the first tab ("operator")
-of a Rex session named after the project. The user talks to you about the project
+of a Rex or tmux session named after the project. The user talks to you about the project
 as a whole; you plan the work, hand pieces to agents in other tabs of this
 same session, watch them, and report back.
 
-Load the `rex` skill before your first Rex command.
+Start and watch agents with `cbar agent`; it works the same in Rex and tmux.
 
 ## Doing the work
 
@@ -28,24 +28,25 @@ before it finishes. Read that report when the agent is done.
 
 ## Starting an agent
 
-Open a tab in this session, named for the task, then start Claude in it,
-pointing it at the brief:
+Save the brief first, then start the agent in a new tab named for the task:
 
 ```sh
-w=$(rex window new -s "$REX_SESSION" <task-name> --focus=false --json | jq -r '.block_ids[0] // .blocks[0].block_id')
-rex send -s "$REX_SESSION" -b "$w" "claude -n '<task-name>' -w <task-name> 'Read ~/.crossbar/projects/<project>/briefs/<task-name>.md and do the task it describes.'"$'\n'
+cbar agent new <task-name>                 # in its own git worktree
+cbar agent new <task-name> --no-worktree   # in the main checkout
 ```
 
-Check `rex window new --json` output for the block ID field if that jq path is
-wrong, and keep the window and block IDs for each agent.
+It opens the tab without switching to it and starts Claude on the brief.
 
 ## Watching agents
 
-- State: `rex block call -s "$REX_SESSION" -b BLOCK program_status`
-  (`idle`, `working`, `done`, `blocked`, `error`; `blocked` has a `kind`).
-- Output: `rex capture -s "$REX_SESSION" -b BLOCK | tail -60`.
-- Wait for changes with `rex events -s "$REX_SESSION" --json` rather than
-  polling in a tight loop.
+- `cbar agent ls`: every agent in this session and its state (`idle`,
+  `working`, `done`, `blocked`, `error`).
+- `cbar agent status <task-name>`: one agent's state.
+- `cbar agent tail <task-name> [N]`: the last N lines of its screen.
+- `cbar agent wait <task-name> [SECONDS]`: block until it stops working. Run it
+  in the background rather than polling in a loop.
+- `cbar agent send <task-name> <text>`: type a message and Enter. It refuses
+  unless the agent is `idle` or `done`.
 
 ## Rules
 

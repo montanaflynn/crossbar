@@ -56,8 +56,13 @@ Each project lives in one terminal, recorded in its `project.toml`. A switchboar
 shows every Rex and tmux session together, wherever it runs, and jumps to any pane:
 in Rex it asks the Rex app, in tmux it switches the tmux client.
 
-Rex reports each agent's status itself. In tmux the status comes from `claude agents`,
-matched to panes by process: idle, working and blocked, but no "done" or status message.
+Claude Code reports its own status (state, what it's blocked on, and a one-line
+summary) to terminals that answer its OSC 7501 probe. Rex does; tmux doesn't. So in
+tmux, `cbar` starts Claude through `relay`, a small proxy that answers the probe and
+writes the status to the pane's tmux options. Switchboard reads them there, so tmux
+shows the same states and messages as Rex. A Claude you start yourself in tmux shows
+idle, working or blocked (from `claude agents`); run it as `~/.crossbar/bin/relay claude`
+for the full status.
 
 To try tmux, from any terminal:
 
@@ -71,7 +76,7 @@ cbar board                   # in another tmux window: the main switchboard
 
 ```
 ~/.crossbar/
-├── bin/cbar, bin/switchboard    installed by ./install (don't edit, see below)
+├── bin/cbar, switchboard, relay   installed by ./install (don't edit, see below)
 ├── operator.md                  the operator role prompt
 ├── version
 ├── central/{briefs,reports}/    the supervisor's agents

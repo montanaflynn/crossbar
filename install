@@ -23,6 +23,7 @@ put() {
 }
 put $src/bin/cbar $dest/bin/cbar 755
 put $src/bin/switchboard $dest/bin/switchboard 755
+put $src/bin/relay $dest/bin/relay 755
 put $src/operator.md $dest/operator.md 644
 
 for f in cbar switchboard; do

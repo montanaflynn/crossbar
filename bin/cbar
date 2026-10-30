@@ -7,6 +7,7 @@ emulate -L zsh
 
 CROSSBAR=${CROSSBAR_HOME:-~/.crossbar}
 BIN=${0:A:h}
+ME=${BIN/#$HOME/~}/cbar   # what a new pane types to run this cbar
 REPO=${CROSSBAR_REPO:-https://github.com/montanaflynn/crossbar}
 
 usage() {
@@ -141,7 +142,7 @@ new_rex() {
   block=$(rex new "$name" -c "$dir" --window operator --json | jq -r '.initial_windows[0].block_ids[0]')
   [[ -n $block && $block != null ]] || die "could not create session '$name'"
   sleep 0.5
-  rex send -s "$name" -b "$block" "cbar operator"$'\n'
+  rex send -s "$name" -b "$block" "$ME operator"$'\n'
 
   # a scoped switchboard (this session's tabs and agents) to the right of the operator
   board=$(rex split -s "$name" -b "$block" -c "$dir" --split=right --ratio 30 --focus=false \
@@ -150,7 +151,7 @@ new_rex() {
     jq -r '[.blocks[] | select(.label == "switchboard")][0].block_id // empty')
   if [[ -n $board ]]; then
     sleep 0.5
-    rex send -s "$name" -b "$board" "cbar board --here"$'\n'
+    rex send -s "$name" -b "$board" "$ME board --here"$'\n'
   else
     print -u2 "cbar: could not add the switchboard pane"
   fi
@@ -166,13 +167,13 @@ new_tmux() {
 
   pane=$(tm new-session -d -s $name -c $dir -n operator -x 200 -y 50 -P -F '#{pane_id}') ||
     die "could not create session '$name'"
-  tm send-keys -t $pane "cbar operator" Enter
+  tm send-keys -t $pane "$ME operator" Enter
 
   # a scoped switchboard (this session's tabs and agents) to the right of the operator
   board=$(tm split-window -h -d -l 30% -t $pane -c $dir -P -F '#{pane_id}')
   if [[ -n $board ]]; then
     tm set-option -p -t $board @cbar_label switchboard
-    tm send-keys -t $board "cbar board --here" Enter
+    tm send-keys -t $board "$ME board --here" Enter
   else
     print -u2 "cbar: could not add the switchboard pane"
   fi
@@ -186,7 +187,8 @@ cmd_operator() {
   project=${project:-${PWD:t}}
   home=$CROSSBAR/projects/$project
   mkdir -p $home/briefs $home/reports
-  exec claude -n "$project operator" --append-system-prompt "$(<$CROSSBAR/operator.md)
+  # relay reports Claude's status in tmux as Rex does; elsewhere it just runs claude
+  exec $BIN/relay claude -n "$project operator" --append-system-prompt "$(<$CROSSBAR/operator.md)
 
 Your project is \`$project\`: briefs go in \`${home/#$HOME/~}/briefs/\`, reports in \`${home/#$HOME/~}/reports/\`."
 }
@@ -303,15 +305,17 @@ agent_new() {
   local -a cmd=(claude -n $task)
   [[ -n $wt ]] && cmd+=(-w $task)
   cmd+=("Read $brief and do the task it describes.")
-  line=${(j: :)${(q)cmd}}
   case $(here_terminal) in
     tmux)
+      cmd=($BIN/relay $cmd)
+      line=${(j: :)${(q)cmd}}
       id=$(tm new-window -d -t "$(tm display-message -p -t $TMUX_PANE '#{session_id}'):" -n $task -c $dir \
         -P -F '#{pane_id}') || die "could not open a tab"
       tm send-keys -t $id -l -- $line
       tm send-keys -t $id Enter
       ;;
     rex)
+      line=${(j: :)${(q)cmd}}
       id=$(rex window new -s $REX_SESSION $task -c $dir --focus=false --json |
         jq -r '.block_ids[0] // .blocks[0].block_id // empty')
       [[ -n $id ]] || die "could not open a tab"

@@ -90,6 +90,10 @@ rex_session_id() {
 
 tmux_has() { tm has-session -t "=$1" 2>/dev/null }
 
+# claude-relay reports Claude's status in tmux as Rex does (elsewhere it just
+# runs claude); without it, plain claude
+claude_cmd() { [[ -x $BIN/claude-relay ]] && print -r -- $BIN/claude-relay || print claude }
+
 # panes [--here|--session N]: one JSON object per pane, from the switchboard,
 # with mux (rex or tmux) and group (the session, or scoped, the tab)
 panes() {
@@ -187,8 +191,7 @@ cmd_operator() {
   project=${project:-${PWD:t}}
   home=$CROSSBAR/projects/$project
   mkdir -p $home/briefs $home/reports
-  # relay reports Claude's status in tmux as Rex does; elsewhere it just runs claude
-  exec $BIN/relay claude -n "$project operator" --append-system-prompt "$(<$CROSSBAR/operator.md)
+  exec $(claude_cmd) -n "$project operator" --append-system-prompt "$(<$CROSSBAR/operator.md)
 
 Your project is \`$project\`: briefs go in \`${home/#$HOME/~}/briefs/\`, reports in \`${home/#$HOME/~}/reports/\`."
 }
@@ -307,7 +310,7 @@ agent_new() {
   cmd+=("Read $brief and do the task it describes.")
   case $(here_terminal) in
     tmux)
-      cmd=($BIN/relay $cmd)
+      cmd[1]=$(claude_cmd)
       line=${(j: :)${(q)cmd}}
       id=$(tm new-window -d -t "$(tm display-message -p -t $TMUX_PANE '#{session_id}'):" -n $task -c $dir \
         -P -F '#{pane_id}') || die "could not open a tab"

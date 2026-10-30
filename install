@@ -23,10 +23,23 @@ put() {
 }
 put $src/bin/cbar $dest/bin/cbar 755
 put $src/bin/switchboard $dest/bin/switchboard 755
-put $src/bin/relay $dest/bin/relay 755
+
+# claude-relay (Rust) gives Claude's full status in tmux; without cargo,
+# crossbar runs plain claude there
+if (( $+commands[cargo] )); then
+  if cargo build --release --locked -q --manifest-path $src/claude-relay/Cargo.toml; then
+    put $src/claude-relay/target/release/claude-relay $dest/bin/claude-relay 755
+  else
+    print -u2 "install: warning: claude-relay did not build; tmux shows less status"
+  fi
+else
+  print -u2 "install: warning: no cargo (https://rustup.rs), so no claude-relay; tmux shows less status"
+fi
+rm -f $dest/bin/relay   # the Python relay it replaced
 put $src/operator.md $dest/operator.md 644
 
-for f in cbar switchboard; do
+for f in cbar switchboard claude-relay; do
+  [[ -e $dest/bin/$f ]] || continue
   if [[ $(readlink $links/$f) == $dest/bin/$f ]]; then
     continue
   elif [[ -e $links/$f && ! -L $links/$f ]]; then

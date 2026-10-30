@@ -1,0 +1,15 @@
+[package]
+name = "claude-relay"
+version = "0.1.0"
+edition = "2021"
+description = "Run Claude Code under tmux with its program status (OSC 7501) reported to the pane, as in Rex"
+license = "MIT"
+
+[dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+panic = "abort"

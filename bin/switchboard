@@ -246,15 +246,26 @@ def main_window(sid, bid):
     return block.get("window_id") if block and is_main_board(sid, block) else None
 
 
-# tmux: one list-panes call per refresh. A Claude started through relay
-# reports its status (OSC 7501, as in Rex) to its pane's options @cbar_state,
-# @cbar_kind, @cbar_msg and @cbar_since. Any other Claude's comes from `claude
-# agents`, matched to the pane whose process it descends from: idle, working or
-# blocked, with no message. Switchboards mark their own pane with @cbar_role
-# (main or local); cbar labels panes it makes with @cbar_label.
+# tmux: one list-panes call per refresh. A Claude started through
+# claude-relay reports its status (OSC 7501, as in Rex) to its pane's options
+# @cbar_state, @cbar_kind, @cbar_msg and @cbar_since, the relay's pid in
+# @cbar_relay (a dead relay's status is stale). Any other Claude's comes from
+# `claude agents`, matched to the pane whose process it descends from: idle,
+# working or blocked, with no message. Switchboards mark their own pane with
+# @cbar_role (main or local); cbar labels panes it makes with @cbar_label.
 TMUX_FIELDS = ("session_id", "session_name", "window_id", "window_name", "pane_id",
                "pane_pid", "pane_current_command", "pane_current_path", "@cbar_label", "@cbar_role",
-               "@cbar_state", "@cbar_kind", "@cbar_msg", "@cbar_since")
+               "@cbar_state", "@cbar_kind", "@cbar_msg", "@cbar_since", "@cbar_relay")
+
+
+def alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except PermissionError:
+        return True
+    except (ValueError, OSError):
+        return False
 CLAUDE_STATES = {"busy": "working", "waiting": "blocked", "idle": "idle"}
 SINCE = {}   # pane id → (state, when it was first seen in that state)
 
@@ -319,6 +330,9 @@ def tmux_pane(row, claude):
         return None
     s = claude.get(int(row["pane_pid"]) if row["pane_pid"].isdigit() else 0)
     state, kind, msg, since = row["@cbar_state"], row["@cbar_kind"], text(row["@cbar_msg"]), row["@cbar_since"]
+    if row["@cbar_relay"] and not alive(row["@cbar_relay"]):
+        state = kind = msg = since = ""
+    relayed = bool(state)
     if not state and s:
         state = s["state"] if s.get("state") in ORDER else CLAUDE_STATES.get(s.get("status"), "")
         seen = SINCE.get(row["pane_id"])
@@ -332,7 +346,7 @@ def tmux_pane(row, claude):
         "window_id": row["window_id"],
         "tab": row["window_name"],
         "label": row["@cbar_label"] or ("switchboard" if role else "shell"),
-        "program": "claude" if s or row["@cbar_state"] else ("switchboard" if role else row["pane_current_command"]),
+        "program": "claude" if s or relayed else ("switchboard" if role else row["pane_current_command"]),
         "cwd": short(row["pane_current_path"]),
         "state": state,
         "kind": kind,

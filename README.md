@@ -14,7 +14,8 @@ Run a team of Claude Code agents across projects, in Rex or tmux.
 ## Install
 
 Requires zsh, Python 3, [jq](https://jqlang.org), [Claude Code](https://claude.com/claude-code),
-and Rex or tmux (3.0+).
+and Rex or tmux (3.0+). For full agent status in tmux, also [Rust](https://rustup.rs): `./install`
+builds `claude-relay` with cargo.
 
 ```sh
 git clone https://github.com/montanaflynn/crossbar.git
@@ -57,12 +58,17 @@ shows every Rex and tmux session together, wherever it runs, and jumps to any pa
 in Rex it asks the Rex app, in tmux it switches the tmux client.
 
 Claude Code reports its own status (state, what it's blocked on, and a one-line
-summary) to terminals that answer its OSC 7501 probe. Rex does; tmux doesn't. So in
-tmux, `cbar` starts Claude through `relay`, a small proxy that answers the probe and
-writes the status to the pane's tmux options. Switchboard reads them there, so tmux
-shows the same states and messages as Rex. A Claude you start yourself in tmux shows
-idle, working or blocked (from `claude agents`); run it as `~/.crossbar/bin/relay claude`
-for the full status.
+summary) to terminals that answer its OSC 7501 probe. Rex does; tmux doesn't, and the
+answer has to arrive in the byte stream, so nothing outside it can give one. So in
+tmux, `cbar` starts Claude through `claude-relay`, a small Rust proxy that answers the
+probe and writes the status to the pane's tmux options, where switchboard reads it.
+tmux then shows the same states and messages as Rex.
+
+`claude-relay` takes Claude's arguments and runs it on a pty of its own; outside tmux
+it just runs `claude`. Ctrl-Z, resizing and exit codes work as usual. To get full status
+for a Claude you start yourself in tmux, run `claude-relay` in its place (or
+`alias claude=claude-relay`). Without it, tmux shows idle, working or blocked from
+`claude agents`, with no message.
 
 To try tmux, from any terminal:
 
@@ -76,7 +82,8 @@ cbar board                   # in another tmux window: the main switchboard
 
 ```
 ~/.crossbar/
-├── bin/cbar, switchboard, relay   installed by ./install (don't edit, see below)
+├── bin/                         cbar, switchboard, claude-relay: installed by ./install
+│                                (don't edit, see below)
 ├── operator.md                  the operator role prompt
 ├── version
 ├── central/{briefs,reports}/    the supervisor's agents

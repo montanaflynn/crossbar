@@ -11,6 +11,9 @@ matched to a pane by process.
   switchboard --here          same, for this pane's session ($TMUX_PANE or $REX_SESSION)
   switchboard --once          print once and exit (combines with the above)
   switchboard --json          print the panes as JSON and exit (combines with the above)
+  switchboard --watch --here  print a line as each report turns done, blocked or error,
+                              stops or closes (reports: this session's agents; in
+                              `central`, also each project's operator)
 
 $CROSSBAR_TMUX_SOCKET names a tmux server other than the default (tmux -L).
 
@@ -955,6 +958,79 @@ def live(scope=None, scope_label=None):
         out.flush()
 
 
+REPORTABLE = ("done", "blocked", "error")
+
+
+def reports(scope, scope_label):
+    """{pane id: (name, state, kind, msg)} for the panes reporting to whoever
+    runs in SCOPE: its own agent tabs and, for `central`, each project's
+    operator too. Switchboards and our own pane are left out (HIDE)."""
+    found = {}
+    def add(name, p):
+        if p["program"] != "switchboard" and p["label"] != "switchboard":
+            found[p["block_id"]] = (name, p["state"], p["kind"], p["msg"])
+    if scope_label != "central":
+        for _, panes in snapshot(scope):
+            for p in panes:
+                add(p["tab"] or p["program"], p)
+        return found
+    for session, panes in snapshot():
+        for p in panes:
+            if session["session_id"] == scope:
+                add(p["tab"] or p["program"], p)
+            elif p["tab"] == "operator":
+                add(f"{session['label']} operator", p)
+    return found
+
+
+def watch(scope, scope_label, every=3, wait_msg=8):
+    """Print a line each time one of the caller's reports turns done, blocked
+    or error (with its message), stops running Claude, or closes. Nothing at
+    startup. A report without a message waits up to WAIT_MSG seconds for one
+    (Rex sends the summary just after the state); a pane must be missing from
+    two looks in a row to count as closed."""
+    def say(name, state, kind, msg):
+        print(f"{name}: {state}{f' ({kind})' if kind else ''}{f' — {msg}' if msg else ''}", flush=True)
+
+    last, pending, missing = {}, {}, {}
+    first = True
+    while True:
+        now = time.time()
+        cur = reports(scope, scope_label)
+        for key, (name, state, kind, msg) in cur.items():
+            missing.pop(key, None)
+            prev = last.get(key)
+            if not state and not prev:
+                continue   # not an agent (yet)
+            last[key] = (name, state, kind, msg)
+            if first or (prev and (prev[1], prev[3]) == (state, msg)):
+                continue
+            pending.pop(key, None)
+            if state in REPORTABLE:
+                if msg or (prev and prev[1] == state):
+                    say(name, state, kind, msg)
+                else:
+                    pending[key] = now
+            elif not state and prev and prev[1]:
+                say(name, "stopped", "", "")
+        for key, since in list(pending.items()):
+            name, state, kind, msg = last[key]
+            if state not in REPORTABLE:
+                del pending[key]
+            elif msg or now - since >= wait_msg:
+                del pending[key]
+                say(name, state, kind, msg)
+        for key in [k for k in last if k not in cur]:
+            missing[key] = missing.get(key, 0) + 1
+            if missing[key] >= 2:
+                if not first:
+                    say(last[key][0], "closed", "", "")
+                del last[key], missing[key]
+                pending.pop(key, None)
+        first = False
+        time.sleep(every)
+
+
 def main():
     args = sys.argv[1:]
     scope = label = None
@@ -974,7 +1050,14 @@ def main():
         if not found:
             sys.exit(f"switchboard: no session '{scope}'")
         scope, label = found["session_id"], found.get("label") or found["session_id"][-6:]
-    if "--json" in args:
+    if "--watch" in args:
+        if not scope:
+            sys.exit("switchboard: --watch needs --here or --session NAME")
+        try:
+            watch(scope, label)
+        except (KeyboardInterrupt, BrokenPipeError):
+            pass
+    elif "--json" in args:
         print(json.dumps([{"group": g, "panes": panes} for g, panes in snapshot(scope)], indent=1))
     elif "--once" in args:
         if scope:

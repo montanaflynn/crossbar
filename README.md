@@ -41,6 +41,8 @@ cbar board [--here|--session N]      run the switchboard (--once prints once, --
 cbar ls                              registered projects, their terminal, sessions and operators
 cbar open NAME                       switch to that project's session (outside tmux: attach to it)
 cbar rm [-y] NAME                    kill its session and unregister it, briefs and reports too (asks first)
+cbar watch                           a line each time one of your reports turns done, blocked or error,
+                                     stops or closes (operators: their agents; central: also each operator)
 ```
 
 Operators start and watch agents in their own session, the same way in Rex and tmux:

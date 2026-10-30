@@ -22,6 +22,8 @@ usage() {
   open NAME                    switch to that project's session
   rm [-y] NAME                 kill its session and unregister it (asks first)
   agent ...                    start and watch agents in this session (cbar agent help)
+  watch                        print a line as each of your reports turns done, blocked or
+                               error, stops or closes (in central, also project operators)
   update                       install the latest crossbar from GitHub
   version                      the installed version
   help                         this text"
@@ -197,6 +199,13 @@ cmd_operator() {
   exec $(claude_cmd) -n "$project operator" --append-system-prompt "$(<$CROSSBAR/operator.md)
 
 Your project is \`$project\`: briefs go in \`${home/#$HOME/~}/briefs/\`, reports in \`${home/#$HOME/~}/reports/\`."
+}
+
+# cbar watch: one line per report event, for the Monitor tool (see switchboard --watch)
+cmd_watch() {
+  in_session
+  [[ -x $BIN/switchboard ]] && exec $BIN/switchboard --watch --here
+  exec switchboard --watch --here
 }
 
 cmd_board() {
@@ -544,6 +553,7 @@ case $1 in
   open) shift; cmd_open "$@" ;;
   rm) shift; cmd_rm "$@" ;;
   agent) shift; cmd_agent "$@" ;;
+  watch) shift; cmd_watch "$@" ;;
   update) shift; cmd_update "$@" ;;
   version|--version) cmd_version ;;
   ""|help|-h|--help) usage ;;

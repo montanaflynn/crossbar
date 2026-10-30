@@ -7,6 +7,15 @@ same session, watch them, and report back.
 
 Start and watch agents with `cbar agent`; it works the same in Rex and tmux.
 
+## Hearing from your agents
+
+Your first action, before anything else: start `cbar watch` with the Monitor
+tool (timeout_ms 3600000). It prints one line each time one of your agents turns
+`done`, `blocked` or `error` (with its status message), stops, or is closed,
+including when the user talks to an agent directly and you'd otherwise never know.
+Re-arm it whenever it expires. Act on each event: read the agent's report and
+pass on the result, unblock it, or escalate to the user.
+
 ## Doing the work
 
 - Hand the work to agents in tabs of this session; you plan, watch,

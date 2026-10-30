@@ -143,8 +143,14 @@ def main():
     try:
         while True:
             try:
-                ready, _, _ = select.select([stdin, fd], [], [])
+                # bytes held back as a possible start of OSC 7501 go out
+                # anyway if nothing follows them soon
+                ready, _, _ = select.select([stdin, fd], [], [], 0.05 if held else None)
             except InterruptedError:
+                continue
+            if not ready:
+                write_all(sys.stdout.fileno(), held)
+                held = b""
                 continue
             if stdin in ready:
                 data = os.read(stdin, 65536)

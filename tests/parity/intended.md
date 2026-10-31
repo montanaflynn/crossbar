@@ -57,6 +57,567 @@ The same: the agent in a non-git project starts without `-w` (the stub prints wh
  state: done | no repo here
 ```
 
+## board-here-json (rex)
+
+The same as board-local-json, through `cbar board --here --json`.
+
+```diff
+--- old
++++ new
+@@ -2,66 +2,6 @@
+  {
+   "group": {
+-   "focused_block_id": "<pane>",
+    "label": "operator",
+-   "layers": [
+-    {
+-     "blocks": [
+-      {
+-       "block_id": "<pane>",
+-       "creator_name": "com.superlogical.terminal",
+-       "flavor": "com.superlogical.terminal.shell",
+-       "host_id": "<uuid>",
+-       "label": "shell",
+-       "owner": "<client>"
+-      },
+-      {
+-       "block_id": "<pane>",
+-       "creator_name": "com.superlogical.terminal",
+-       "flavor": "com.superlogical.terminal.shell",
+-       "host_id": "<uuid>",
+-       "label": "switchboard"
+-      }
+-     ],
+-     "bounds": [
+-      0,
+-      0,
+-      1,
+-      1
+-     ],
+-     "kind": "tiled",
+-     "layer_id": "<layer>",
+-     "layout": {
+-      "rect": [
+-       0,
+-       0,
+-       1,
+-       1
+-      ],
+-      "split": {
+-       "after": {
+-        "block_id": "<pane>",
+-        "rect": [
+-         0.7,
+-         0,
+-         0.30000000000000004,
+-         1
+-        ]
+-       },
+-       "before": {
+-        "block_id": "<pane>",
+-        "rect": [
+-         0,
+-         0,
+-         0.7,
+-         1
+-        ]
+-       },
+-       "direction": "horizontal",
+-       "ratio": 0.7,
+-       "split_id": "split:<uuid>"
+-      }
+-     }
+-    }
+-   ],
++   "mux": "rex",
+    "session_id": "<session>",
+    "window_id": "<window>"
+@@ -98,36 +38,6 @@
+  {
+   "group": {
+-   "focused_block_id": "<pane>",
+    "label": "t-ask",
+-   "layers": [
+-    {
+-     "blocks": [
+-      {
+-       "block_id": "<pane>",
+-       "creator_name": "com.superlogical.terminal",
+-       "flavor": "com.superlogical.terminal.shell",
+-       "host_id": "<uuid>",
+-       "label": "shell"
+-      }
+-     ],
+-     "bounds": [
+-      0,
+-      0,
+-      1,
+-      1
+-     ],
+-     "kind": "tiled",
+-     "layer_id": "<layer>",
+-     "layout": {
+-      "block_id": "<pane>",
+-      "rect": [
+-       0,
+-       0,
+-       1,
+-       1
+-      ]
+-     }
+-    }
+-   ],
++   "mux": "rex",
+    "session_id": "<session>",
+    "window_id": "<window>"
+@@ -151,36 +61,6 @@
+  {
+   "group": {
+-   "focused_block_id": "<pane>",
+    "label": "t-boom",
+-   "layers": [
+-    {
+-     "blocks": [
+-      {
+-       "block_id": "<pane>",
+-       "creator_name": "com.superlogical.terminal",
+-       "flavor": "com.superlogical.terminal.shell",
+-       "host_id": "<uuid>",
+-       "label": "shell"
+-      }
+-     ],
+-     "bounds": [
+-      0,
+-      0,
+-      1,
+-      1
+-     ],
+-     "kind": "tiled",
+-     "layer_id": "<layer>",
+-     "layout": {
+-      "block_id": "<pane>",
+-      "rect": [
+-       0,
+-       0,
+-       1,
+-       1
+-      ]
+-     }
+-    }
+-   ],
++   "mux": "rex",
+    "session_id": "<session>",
+    "window_id": "<window>"
+@@ -204,36 +84,6 @@
+  {
+   "group": {
+-   "focused_block_id": "<pane>",
+    "label": "t-busy",
+-   "layers": [
+-    {
+-     "blocks": [
+-      {
+-       "block_id": "<pane>",
+-       "creator_name": "com.superlogical.terminal",
+-       "flavor": "com.superlogical.terminal.shell",
+-       "host_id": "<uuid>",
+-       "label": "shell"
+-      }
+-     ],
+-     "bounds": [
+-      0,
+-      0,
+-      1,
+-      1
+-     ],
+-     "kind": "tiled",
+-     "layer_id": "<layer>",
+-     "layout": {
+-      "block_id": "<pane>",
+-      "rect": [
+-       0,
+-       0,
+-       1,
+-       1
+-      ]
+-     }
+-    }
+-   ],
++   "mux": "rex",
+    "session_id": "<session>",
+    "window_id": "<window>"
+@@ -257,36 +107,6 @@
+  {
+   "group": {
+-   "focused_block_id": "<pane>",
+    "label": "t-chat",
+-   "layers": [
+-    {
+-     "blocks": [
+-      {
+-       "block_id": "<pane>",
+-       "creator_name": "com.superlogical.terminal",
+-       "flavor": "com.superlogical.terminal.shell",
+-       "host_id": "<uuid>",
+-       "label": "shell"
+-      }
+-     ],
+-     "bounds": [
+-      0,
+-      0,
+-      1,
+-      1
+-     ],
+-     "kind": "tiled",
+-     "layer_id": "<layer>",
+-     "layout": {
+-      "block_id": "<pane>",
+-      "rect": [
+-       0,
+-       0,
+-       1,
+-       1
+-      ]
+-     }
+-    }
+-   ],
++   "mux": "rex",
+    "session_id": "<session>",
+    "window_id": "<window>"
+@@ -310,36 +130,6 @@
+  {
+   "group": {
+-   "focused_block_id": "<pane>",
+    "label": "t-done",
+-   "layers": [
+-    {
+-     "blocks": [
+-      {
+-       "block_id": "<pane>",
+-       "creator_name": "com.superlogical.terminal",
+-       "flavor": "com.superlogical.terminal.shell",
+-       "host_id": "<uuid>",
+-       "label": "shell"
+-      }
+-     ],
+-     "bounds": [
+-      0,
+-      0,
+-      1,
+-      1
+-     ],
+-     "kind": "tiled",
+-     "layer_id": "<layer>",
+-     "layout": {
+-      "block_id": "<pane>",
+-      "rect": [
+-       0,
+-       0,
+-       1,
+-       1
+-      ]
+-     }
+-    }
+-   ],
++   "mux": "rex",
+    "session_id": "<session>",
+    "window_id": "<window>"
+```
+
+## board-local-json (rex)
+
+Scoped to one session, 0.4 passed Rex's raw window record through as each group (`layers`, `focused_block_id`); the Rust board gives the same slim group as everywhere (`session_id`, `label`, `mux`, `window_id`). The panes are the same. Confirm: `--json` is documented output.
+
+```diff
+--- old
++++ new
+@@ -2,66 +2,6 @@
+  {
+   "group": {
+-   "focused_block_id": "<pane>",
+    "label": "operator",
+-   "layers": [
+-    {
+-     "blocks": [
+-      {
+-       "block_id": "<pane>",
+-       "creator_name": "com.superlogical.terminal",
+-       "flavor": "com.superlogical.terminal.shell",
+-       "host_id": "<uuid>",
+-       "label": "shell",
+-       "owner": "<client>"
+-      },
+-      {
+-       "block_id": "<pane>",
+-       "creator_name": "com.superlogical.terminal",
+-       "flavor": "com.superlogical.terminal.shell",
+-       "host_id": "<uuid>",
+-       "label": "switchboard"
+-      }
+-     ],
+-     "bounds": [
+-      0,
+-      0,
+-      1,
+-      1
+-     ],
+-     "kind": "tiled",
+-     "layer_id": "<layer>",
+-     "layout": {
+-      "rect": [
+-       0,
+-       0,
+-       1,
+-       1
+-      ],
+-      "split": {
+-       "after": {
+-        "block_id": "<pane>",
+-        "rect": [
+-         0.7,
+-         0,
+-         0.30000000000000004,
+-         1
+-        ]
+-       },
+-       "before": {
+-        "block_id": "<pane>",
+-        "rect": [
+-         0,
+-         0,
+-         0.7,
+-         1
+-        ]
+-       },
+-       "direction": "horizontal",
+-       "ratio": 0.7,
+-       "split_id": "split:<uuid>"
+-      }
+-     }
+-    }
+-   ],
++   "mux": "rex",
+    "session_id": "<session>",
+    "window_id": "<window>"
+@@ -98,36 +38,6 @@
+  {
+   "group": {
+-   "focused_block_id": "<pane>",
+    "label": "t-ask",
+-   "layers": [
+-    {
+-     "blocks": [
+-      {
+-       "block_id": "<pane>",
+-       "creator_name": "com.superlogical.terminal",
+-       "flavor": "com.superlogical.terminal.shell",
+-       "host_id": "<uuid>",
+-       "label": "shell"
+-      }
+-     ],
+-     "bounds": [
+-      0,
+-      0,
+-      1,
+-      1
+-     ],
+-     "kind": "tiled",
+-     "layer_id": "<layer>",
+-     "layout": {
+-      "block_id": "<pane>",
+-      "rect": [
+-       0,
+-       0,
+-       1,
+-       1
+-      ]
+-     }
+-    }
+-   ],
++   "mux": "rex",
+    "session_id": "<session>",
+    "window_id": "<window>"
+@@ -151,36 +61,6 @@
+  {
+   "group": {
+-   "focused_block_id": "<pane>",
+    "label": "t-boom",
+-   "layers": [
+-    {
+-     "blocks": [
+-      {
+-       "block_id": "<pane>",
+-       "creator_name": "com.superlogical.terminal",
+-       "flavor": "com.superlogical.terminal.shell",
+-       "host_id": "<uuid>",
+-       "label": "shell"
+-      }
+-     ],
+-     "bounds": [
+-      0,
+-      0,
+-      1,
+-      1
+-     ],
+-     "kind": "tiled",
+-     "layer_id": "<layer>",
+-     "layout": {
+-      "block_id": "<pane>",
+-      "rect": [
+-       0,
+-       0,
+-       1,
+-       1
+-      ]
+-     }
+-    }
+-   ],
++   "mux": "rex",
+    "session_id": "<session>",
+    "window_id": "<window>"
+@@ -204,36 +84,6 @@
+  {
+   "group": {
+-   "focused_block_id": "<pane>",
+    "label": "t-busy",
+-   "layers": [
+-    {
+-     "blocks": [
+-      {
+-       "block_id": "<pane>",
+-       "creator_name": "com.superlogical.terminal",
+-       "flavor": "com.superlogical.terminal.shell",
+-       "host_id": "<uuid>",
+-       "label": "shell"
+-      }
+-     ],
+-     "bounds": [
+-      0,
+-      0,
+-      1,
+-      1
+-     ],
+-     "kind": "tiled",
+-     "layer_id": "<layer>",
+-     "layout": {
+-      "block_id": "<pane>",
+-      "rect": [
+-       0,
+-       0,
+-       1,
+-       1
+-      ]
+-     }
+-    }
+-   ],
++   "mux": "rex",
+    "session_id": "<session>",
+    "window_id": "<window>"
+@@ -257,36 +107,6 @@
+  {
+   "group": {
+-   "focused_block_id": "<pane>",
+    "label": "t-chat",
+-   "layers": [
+-    {
+-     "blocks": [
+-      {
+-       "block_id": "<pane>",
+-       "creator_name": "com.superlogical.terminal",
+-       "flavor": "com.superlogical.terminal.shell",
+-       "host_id": "<uuid>",
+-       "label": "shell"
+-      }
+-     ],
+-     "bounds": [
+-      0,
+-      0,
+-      1,
+-      1
+-     ],
+-     "kind": "tiled",
+-     "layer_id": "<layer>",
+-     "layout": {
+-      "block_id": "<pane>",
+-      "rect": [
+-       0,
+-       0,
+-       1,
+-       1
+-      ]
+-     }
+-    }
+-   ],
++   "mux": "rex",
+    "session_id": "<session>",
+    "window_id": "<window>"
+@@ -310,36 +130,6 @@
+  {
+   "group": {
+-   "focused_block_id": "<pane>",
+    "label": "t-done",
+-   "layers": [
+-    {
+-     "blocks": [
+-      {
+-       "block_id": "<pane>",
+-       "creator_name": "com.superlogical.terminal",
+-       "flavor": "com.superlogical.terminal.shell",
+-       "host_id": "<uuid>",
+-       "label": "shell"
+-      }
+-     ],
+-     "bounds": [
+-      0,
+-      0,
+-      1,
+-      1
+-     ],
+-     "kind": "tiled",
+-     "layer_id": "<layer>",
+-     "layout": {
+-      "block_id": "<pane>",
+-      "rect": [
+-       0,
+-       0,
+-       1,
+-       1
+-      ]
+-     }
+-    }
+-   ],
++   "mux": "rex",
+    "session_id": "<session>",
+    "window_id": "<window>"
+```
+
+## board-main-json (rex)
+
+The Rust board's `--json` gives every group its `mux`, Rex ones too (0.4 left it out for Rex and readers assumed rex). Confirm: `--json` is documented output.
+
+```diff
+--- old
++++ new
+@@ -3,4 +3,5 @@
+   "group": {
+    "label": "central",
++   "mux": "rex",
+    "session_id": "<session>"
+   },
+@@ -37,4 +38,5 @@
+   "group": {
+    "label": "central/alpha",
++   "mux": "rex",
+    "session_id": "<session>"
+   },
+@@ -136,4 +138,5 @@
+   "group": {
+    "label": "central/beta",
++   "mux": "rex",
+    "session_id": "<session>"
+   },
+```
+
 ## board-main-once
 
 The main board shows one exchange and names it in its subtitle (exchanges.md).
@@ -230,6 +791,30 @@ Any diff. `cbar agent` is a deprecated alias; its help maps each form to the pat
  --- exit 0
 ```
 
+## ls (rex)
+
+`cbar ls` is a tree: the exchange with its supervisor on top, projects under it, their agents under them; the last column is CLAUDE (central.md, exchanges.md).
+
+```diff
+--- old
++++ new
+@@ -1,4 +1,11 @@
+-NAME   TERMINAL  PATH      SESSION  OPERATOR
+-alpha  rex       ~/repo-a  running  idle
+-beta   rex       ~/repo-b  running  idle
++NAME           TERMINAL  PATH      SESSION  CLAUDE
++central        rex       ~         running  supervisor idle
++├─ alpha       rex       ~/repo-a  running  operator idle
++│  ├─ t-done                                done <age>
++│  ├─ t-ask                                 blocked <age>
++│  ├─ t-boom                                error <age>
++│  ├─ t-busy                                working <age>
++│  └─ t-chat                                idle <age>
++└─ beta        rex       ~/repo-b  running  operator idle
++   └─ t-nogit                               done <age>
+ --- exit 0
+```
+
 ## ls-after-rm
 
 The same tree as ls, after t-done and t-boom were closed and beta removed.
@@ -243,6 +828,26 @@ The same tree as ls, after t-done and t-boom were closed and beta removed.
 +NAME          TERMINAL  PATH      SESSION  CLAUDE
 +central       tmux      ~         running  supervisor idle
 +└─ alpha      tmux      ~/repo-a  running  operator idle
++   ├─ t-ask                                blocked <age>
++   ├─ t-busy                               working <age>
++   ├─ t-chat                               done <age>
++   └─ t-path                               idle <age>
+ --- exit 0
+```
+
+## ls-after-rm (rex)
+
+The same tree as ls, after t-done and t-boom were closed and beta removed.
+
+```diff
+--- old
++++ new
+@@ -1,3 +1,8 @@
+-NAME   TERMINAL  PATH      SESSION  OPERATOR
+-alpha  rex       ~/repo-a  running  idle
++NAME          TERMINAL  PATH      SESSION  CLAUDE
++central       rex       ~         running  supervisor idle
++└─ alpha      rex       ~/repo-a  running  operator idle
 +   ├─ t-ask                                blocked <age>
 +   ├─ t-busy                               working <age>
 +   ├─ t-chat                               done <age>
@@ -300,6 +905,20 @@ The project's path carries the exchange (`central/beta`).
 +++ new
 @@ -1,3 +1,2 @@
 -$BIN/claude-relay -n t-chat -w t-chat Read\ ~/.crossbar/exchanges/central/projects/alpha/briefs/t-chat.md\ and\ do\ the\ task\ it\ describes.$ $BIN/claude-relay -n t-chat -w t-chat Read\ ~/.crossbar/exchanges/central/projects/alpha/briefs/t-chat.md\ and\ do\ the\ task\ it\ describes.
+ stub claude: t-chat
+ worktree: t-chat
+```
+
+## tail-chat (rex)
+
+0.4 typed the agent's command line into a shell, so it shows up on the agent's screen; 0.5 starts it as the pane's own command (rust.md addendum: any shell).
+
+```diff
+--- old
++++ new
+@@ -1,4 +1,2 @@
+-p/cbpar-mv1a63wl/home/.crossbar-old/projects/alpha/briefs/t-chat.md\ and\ do\ th
+-e\ task\ it\ describes.
  stub claude: t-chat
  worktree: t-chat
 ```

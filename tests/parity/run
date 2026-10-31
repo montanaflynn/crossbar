@@ -342,8 +342,14 @@ class Rex:
                 self.server.wait(10)
             except subprocess.TimeoutExpired:
                 os.killpg(self.server.pid, signal.SIGKILL)
-        # and anything else still serving its socket
-        for pid in sh(["pgrep", "-f", self.side.rex_sock]).stdout.split():
+        # and anything else still serving its socket, or the scratch HOME's default
+        # one: a rex whose $REX_SERVER is gone falls back to (and autostarts) the
+        # home server, which the scratch HOME keeps inside the sandbox
+        time.sleep(2)
+        pids = sh(["pgrep", "-f", self.side.rex_sock]).stdout.split()
+        pids += sh(["pgrep", "-f", f"{self.side.box.home}/Library/Application Support/rex"]).stdout.split()
+        pids += sh(["pgrep", "-f", f"{self.side.box.home}/Library/Application%20Support/rex"]).stdout.split()
+        for pid in pids:
             try:
                 os.kill(int(pid), signal.SIGKILL)
             except (ValueError, OSError):
@@ -747,6 +753,7 @@ def common(side, text):
     text = re.sub(r"(?<![\w.])\$\d+\b", "<session>", text)
     text = re.sub(r"\bblock:[0-9a-f-]{36}\b", "<pane>", text)
     text = re.sub(r"\b(session|window|client|layer):[0-9a-f-]{36}\b", r"<\1>", text)
+    text = re.sub(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", "<uuid>", text)   # a Rex host_id
     return names(side, text)
 
 
@@ -879,7 +886,7 @@ def reap(root):
             pass
     say(f"parity: killed {len(pids)} process(es) still running after their server stopped:")
     for line in ps.splitlines():
-        say("  " + line.strip().replace(root, "$SANDBOX")[:160])
+        say("  " + line.strip().replace(root, "$SANDBOX"))
 
 
 def run(a, checkout, root):

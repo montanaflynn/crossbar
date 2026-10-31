@@ -54,6 +54,7 @@ MY_BLOCK = os.environ.get("REX_BLOCK", "")
 MY_PANE = os.environ.get("TMUX_PANE", "")
 TMUX_SOCKET = os.environ.get("CROSSBAR_TMUX_SOCKET", "")
 HIDE = {MY_BLOCK, MY_PANE} - {""}   # our own pane; --json shows it
+SHOW_HERE = False                    # the live board lists its own pane, marked "here"
 
 
 def rgb(hex_, bg=False):
@@ -127,11 +128,12 @@ def age(stamp):
 
 def pane(session_id, block, tabs):
     bid = block["block_id"]
-    if bid in HIDE:
+    if bid in HIDE and not SHOW_HERE:
         return None
     proc = rex("block", "call", "-s", session_id, "-b", bid, "process") or {}
     fg = proc.get("foreground") or {}
-    if fg.get("pid") == ME:
+    here = bid in HIDE or fg.get("pid") == ME
+    if here and not SHOW_HERE:
         return None
     status = rex("block", "call", "-s", session_id, "-b", bid, "program_status") or {}
     records = status.get("records") or []
@@ -150,6 +152,7 @@ def pane(session_id, block, tabs):
         "kind": root.get("kind", ""),
         "msg": text(root.get("msg")),
         "since": age(root.get("updated_at")),
+        "here": here,
     }
 
 
@@ -330,7 +333,8 @@ def claude_by_pane(pane_pids):
 
 
 def tmux_pane(row, claude):
-    if row["pane_id"] in HIDE:
+    here = row["pane_id"] in HIDE
+    if here and not SHOW_HERE:
         return None
     s = claude.get(int(row["pane_pid"]) if row["pane_pid"].isdigit() else 0)
     state, kind, msg, since = row["@cbar_state"], row["@cbar_kind"], text(row["@cbar_msg"]), row["@cbar_since"]
@@ -356,6 +360,7 @@ def tmux_pane(row, claude):
         "kind": kind,
         "msg": msg,
         "since": age(since),
+        "here": here,
     }
 
 
@@ -453,14 +458,14 @@ def card(number, session, panes, cols, tick, selected, scoped=False):
     sid = session["session_id"]
     head_target = ("tab", sid, session["window_id"], None) if scoped else ("session", sid, None, None)
 
-    num = f"{number} " if number <= 9 else ""
+    num = f" {number} " if number <= 9 else ""
     tag = " tmux" if session.get("mux") == "tmux" and not scoped else ""
-    title = f" {num}{session['label']}{tag} "
-    path = fit(home, max(inner - len(title) - 4, 0))
-    path_part = f" {path} " if path else ""
-    rule = "─" * max(cols - 3 - len(title) - len(path_part) - 1, 1)
-    lines = [f"{edge}╭─{RESET} {MUTED}{num}{RESET}{BOLD}{FG}{session['label']}{RESET}{DIM}{tag}{RESET} "
-             f"{edge}{rule}{RESET}{MUTED}{path_part}{RESET}{edge}─╮{RESET}"]
+    title = f" {session['label']}{tag} "
+    path = fit(home, max(inner - len(title) - len(num) - 4, 0))
+    path_part = f"{path} " if path else ""
+    rule = "─" * max(cols - 4 - len(title) - len(path_part) - len(num), 1)
+    lines = [f"{edge}╭─{RESET} {BOLD}{FG}{session['label']}{RESET}{DIM}{tag}{RESET} "
+             f"{MUTED}{path_part}{RESET}{edge}{rule}{RESET}{MUTED}{num}{RESET}{edge}─╮{RESET}"]
     targets = [head_target]
 
     def row(content, target=None, hot=False):
@@ -489,11 +494,11 @@ def card(number, session, panes, cols, tick, selected, scoped=False):
             name = p["label"] if p["label"] not in ("", "shell") else p["program"]
         else:
             name = p["tab"] or p["program"]
-        name = fit(name, 16)
         board = not is_agent and p["program"] == "switchboard"
+        name = fit("switchboard" if board else name, 16)
         mark = glyph(p["state"], tick) if is_agent else ("◇" if board else "▪")
-        word = p["state"] if is_agent else p["program"]
-        right = p["since"] if is_agent else ("view" if board else "process")
+        word = p["state"] if is_agent else ("" if board else p["program"])
+        right = p["since"] if is_agent else (("here" if p.get("here") else "view") if board else "process")
         name_color = FG if is_agent or hot else MUTED
         mark_color = color if is_agent else (ACCENT if board else FAINT)
         left = (f"{mark_color}{mark}{RESET} {name_color}{BOLD if hot else ''}{name:<16}{RESET}"
@@ -1067,6 +1072,8 @@ def main():
                 MAIN_LABEL = hit[1]
         print("\n".join(render(snapshot(scope), shutil.get_terminal_size().columns, scope_label=label)[0]))
     else:
+        global SHOW_HERE
+        SHOW_HERE = True
         # in tmux, mark this pane so others can find the main switchboard
         marked = MY_PANE and tmux("set-option", "-p", "-t", MY_PANE, "@cbar_role",
                                   "local" if scope else "main")[0] == 0

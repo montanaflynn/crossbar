@@ -514,7 +514,7 @@ fn cmd_up(home: &Home, args: Vec<String>) {
 
     let dir = util::home().to_string_lossy().into_owned();
     if legacy && !mux::session_running(&e, term) && all.iter().any(|f| f.group == "central" && f.mux == term.as_str()) {
-        println!("{e}: running as 'central' (its 0.4 name; rename it to {e}, see MIGRATING.md)");
+        println!("{e}: running as 'central' (its 0.4 name): rename that session to '{e}'");
     } else {
         up_one(&all, &e, &dir, term, SUPERVISOR, &format!("/{e}"));
     }
@@ -525,7 +525,7 @@ fn cmd_up(home: &Home, args: Vec<String>) {
         }
         let session = p.session();
         if legacy && !mux::session_running(&session, p.terminal) && all.iter().any(|f| f.group == p.name && f.mux == p.terminal.as_str()) {
-            println!("{session}: running as '{}' (its 0.4 name; rename it to {session}, see MIGRATING.md)", p.name);
+            println!("{session}: running as '{}' (its 0.4 name): rename that session to '{session}'", p.name);
             continue;
         }
         up_one(&all, &session, &p.path, p.terminal, OPERATOR, &format!("/{session}"));

@@ -135,17 +135,23 @@ impl Home {
         !self.exchanges_dir().is_dir() && (real_dir(self.root.join("projects")) || real_dir(self.root.join("central")))
     }
 
-    /// Stop with a pointer to MIGRATING.md if this home has the 0.4 layout.
+    /// Stop, saying what to move, if this home has the 0.4 layout.
     pub fn require_layout(&self) {
         let left = self.root.join("projects");
+        let ex = self.exchange_dir(&self.default_exchange());
         if !self.old_layout() && fs::symlink_metadata(&left).is_ok_and(|m| m.is_dir()) {
-            util::warn(format!("{} is a 0.4 folder: what's in it isn't in exchanges/ (see MIGRATING.md)", util::short(&left)));
+            util::warn(format!(
+                "{} is a 0.4 folder that cbar no longer reads: move each project in it to {}/",
+                util::short(&left),
+                util::short(ex.join("projects"))
+            ));
         }
         if self.old_layout() {
             util::die(format!(
-                "{} has the 0.4 layout (central/, projects/); move it into exchanges/{} first (see MIGRATING.md)",
+                "{} has the 0.4 layout, which cbar no longer reads: move central/ to {}/ (central.toml becomes exchange.toml) and each projects/<name>/ to {}/<name>/",
                 util::short(&self.root),
-                DEFAULT_EXCHANGE
+                util::short(&ex),
+                util::short(ex.join("projects"))
             ));
         }
     }

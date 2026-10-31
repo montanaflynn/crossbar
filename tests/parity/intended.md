@@ -926,6 +926,24 @@ The Rust cbar knows its own version (VERSION is 0.5.0); 0.4 only read ~/.crossba
  --- exit 0
 ```
 
+## watch
+
+Two changes, both wanted. The addendum "cbar watch at startup": a watch prints what stands when it starts (blocked and error, and a done no earlier watch printed), where 0.4 printed nothing at startup. And a `closed` event carries the report's last message (`t-done: closed — finished the thing`), so whoever reads the event knows what the closed agent last said without a second look; the user asked to keep it.
+
+```diff
+--- old
++++ new
+@@ -1,3 +1,7 @@
++t-ask: blocked (permission) — allow npm test?
++t-boom: error — tests failed
++t-chat: done — did: again
++t-done: done — finished the thing
+ t-chat: done — did: ping
+-t-done: closed
++t-done: closed — finished the thing
+ --- exit watch ran
+```
+
 ## watch-restart
 
 The addendum "cbar watch at startup": a restarted watch prints what is blocked or in error again, but not a done the first watch already printed. 0.4 printed nothing at startup.

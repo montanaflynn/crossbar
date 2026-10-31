@@ -22,10 +22,12 @@ Each side gets, under one `/tmp/cbpar-*` folder that is removed afterwards (`--k
 - a scratch HOME (with an empty ZDOTDIR) holding the project folders `repo-a` (a git repo, project
   `alpha`) and `repo-b` (not one, project `beta`), and the side's CROSSBAR_HOME;
 - its own tmux server (`tmux -L cbpar-old-PID`), or its own Rex server on a private socket. A tmux
-  run puts a `rex` on PATH that always fails, so neither side sees the live Rex server; a Rex run
-  puts one there that always passes `-S <private socket> --autostart=false` (rex ignores
-  `$REX_SERVER`), and first checks that a Rex pane's login shell finds the sandbox's `claude` and
-  `rex`;
+  run puts a `rex` on PATH that always fails, so neither side sees the live Rex server. A Rex run
+  puts one there that always passes `-S <private socket> --autostart=false` (rex falls back to
+  the home server when `$REX_SERVER`'s socket is missing), starts the server with `REX_SERVER` set
+  to its own socket (a Rex pane runs Rex's own `rex` first), and stops unless a probe in a shell
+  pane and in a command pane finds the stub `claude`, the sandbox's settings, and only the probe
+  sessions in `rex ls`;
 - `stub/claude` in place of Claude. It reports a state with OSC 7501 (Rex reads it, and in tmux the
   real claude-relay turns it into pane options), taken from the first line of the agent's brief
   (`stub: blocked permission | allow npm test?`); typed lines make it work, then report done.

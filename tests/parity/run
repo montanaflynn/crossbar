@@ -224,6 +224,9 @@ class Tmux:
 
     def stop(self):
         self("kill-server")
+        path = f"/private/tmp/tmux-{os.getuid()}/{self.side.sock}"
+        if os.path.exists(path):
+            os.unlink(path)
 
     def pane_env(self, sid, pane):
         return {"TMUX_PANE": pane, "TMUX": f"/private/tmp/tmux-{os.getuid()}/{self.side.sock},0,0"}
@@ -516,9 +519,27 @@ def path_new_case(case, side):
     """An agent started by its path with a brief to copy (new), against `agent new` (old)."""
     brief = os.path.join(HERE, "fixtures", "briefs", "t-path.md")
     if side.name == "old":
+        os.makedirs(side.briefs("alpha"), exist_ok=True)
         shutil.copy(brief, side.briefs("alpha"))
         return side.run(["cbar", "agent", "new", "t-path"], pane="alpha")
     return side.run(["cbar", "new", "alpha/t-path", brief])
+
+
+def watch_restart_case(case, side):
+    """cbar watch started again after the first one: what it prints at startup
+    (the addendum: what is blocked or in error again, not a done it already printed)."""
+    env = dict(side.env)
+    env.update(side.mux.pane_env(*side.panes_at["alpha"]))
+    log = os.path.join(side.box.root, f"watch2-{side.name}.out")
+    with open(log, "w") as out, open(log + ".err", "w") as err:
+        p = subprocess.Popen([os.path.join(side.bin, "cbar"), "watch"], env=env, cwd=side.box.home,
+                             stdout=out, stderr=err, stdin=subprocess.DEVNULL, start_new_session=True)
+    CLEANUP.add(f"{side.name} watch again", lambda: p.poll() is None and os.killpg(p.pid, signal.SIGKILL))
+    time.sleep(8)
+    if p.poll() is None:
+        os.killpg(p.pid, signal.SIGTERM)
+    code = p.wait(10)
+    return ("watch ran" if code in (-signal.SIGTERM, 0, 143) else code), open(log).read(), open(log + ".err").read()
 
 
 def setup_case(case, side):
@@ -584,10 +605,11 @@ def cases():
         C("send-chat", ["cbar", "agent", "send", "t-chat", "hello"], pane="alpha"),
         C("wait-chat", ["cbar", "agent", "wait", "t-chat", "30"], pane="alpha"),
         C("tail-chat", ["cbar", "agent", "tail", "t-chat", "8"], pane="alpha"),
-        C("path-send-chat", ["cbar", "agent", "send", "t-chat", "again"], ["cbar", "send", "alpha/t-chat", "again"]),
+        C("path-send-chat", ["cbar", "agent", "send", "t-chat", "again"], ["cbar", "send", "alpha/t-chat", "again"], pane="alpha"),
         C("path-wait-chat", ["cbar", "agent", "wait", "t-chat", "30"], ["cbar", "wait", "alpha/t-chat", "30"], pane="alpha"),
         C("watch", None, run=watch_case, timeout=120),
         C("watch-close-t-done", None, run=setup_case),
+        C("watch-restart", None, run=watch_restart_case, timeout=60),
         C("close-boom", ["cbar", "agent", "close", "-f", "t-boom"], pane="alpha"),
         C("rm-project", ["cbar", "rm", "-y", "beta"]),
         C("ls-after-rm", ["cbar", "ls"]),
@@ -660,11 +682,23 @@ def names(side, text):
     session is `main/alpha`. Applied to the old side."""
     if side.name != "old":
         return text
-    text = re.sub(r"\bcentral\b", "main", text)
+    text = "\n".join(keep_width(l, re.sub(r"\bcentral\b", "main", l)) for l in text.split("\n"))
     ps = "|".join(PROJECTS)
     text = re.sub(rf"(session '|\"label\": \"|=)({ps})\b", r"\1main/\2", text)
     text = text.replace("~/.crossbar/projects/", "~/.crossbar/exchanges/main/projects/")
     return text
+
+
+def keep_width(before, after):
+    """AFTER, widened back to BEFORE's width where a rename made it shorter, by
+    stretching its longest run of rule or spaces (a card header, the board's
+    top line), so a renamed card isn't a diff on its own."""
+    short = len(before) - len(after)
+    runs = list(re.finditer(r"─{2,}| {2,}", after))
+    if short <= 0 or not runs:
+        return after
+    m = max(runs, key=lambda m: m.end() - m.start())
+    return after[:m.end()] + m.group(0)[0] * short + after[m.end():]
 
 
 def common(side, text):
@@ -815,6 +849,8 @@ def run(a, checkout, root):
     box = Sandbox(root, a.rex)
     old = build_old(box, a.old, a.rex)
     new = build_new(box, checkout, not a.no_build, a.rex)
+    # claude-relay isn't what's compared: both sides use the new build's
+    shutil.copy2(os.path.join(new.bin, "claude-relay"), os.path.join(old.bin, "claude-relay"))
     todo = [c for c in cases() if not a.only or re.search(a.only, c.name)]
     results = {}
     for side in (old, new):

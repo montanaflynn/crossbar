@@ -444,7 +444,7 @@ impl Status {
         if self.last.as_ref() == Some(&now) {
             return;
         }
-        let changed = self.last.as_ref().map_or(true, |l| l.0 != now.0);
+        let changed = self.last.as_ref().is_none_or(|l| l.0 != now.0);
         let since = iso_now();
         let mut pairs = vec![("@cbar_state", now.0.as_str()), ("@cbar_kind", now.1.as_str()), ("@cbar_msg", now.2.as_str())];
         if changed {

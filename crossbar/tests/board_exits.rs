@@ -15,6 +15,8 @@ struct Server {
     socket: String,
     env_path: PathBuf,
     home: PathBuf,
+    /// The server's socket file, once it runs (tmux leaves it behind).
+    socket_path: std::cell::RefCell<String>,
 }
 
 impl Server {
@@ -25,7 +27,7 @@ impl Server {
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         std::os::unix::fs::symlink(&tmux, bin.join("tmux")).unwrap();
-        Some(Server { socket: format!("cbar-test-{tag}-{}", std::process::id()), env_path: bin, home: dir.join("home") })
+        Some(Server { socket: format!("cbar-test-{tag}-{}", std::process::id()), env_path: bin, home: dir.join("home"), socket_path: Default::default() })
     }
 
     fn tmux(&self, args: &[&str]) -> String {
@@ -47,6 +49,7 @@ impl Server {
     fn start_board(&self) -> i32 {
         let cbar = env!("CARGO_BIN_EXE_cbar");
         self.tmux(&["new-session", "-d", "-s", "b", "-x", "100", "-y", "30", cbar, "run", "--pane", "board"]);
+        *self.socket_path.borrow_mut() = self.tmux(&["display-message", "-p", "#{socket_path}"]);
         let pane_pid = self.tmux(&["display-message", "-p", "-t", "=b:", "#{pane_pid}"]);
         let until = Instant::now() + Duration::from_secs(10);
         while Instant::now() < until {
@@ -64,6 +67,10 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         self.tmux(&["kill-server"]);
+        let socket = self.socket_path.borrow();
+        if !socket.is_empty() {
+            let _ = std::fs::remove_file(&*socket);
+        }
         let _ = std::fs::remove_dir_all(self.home.parent().unwrap_or(Path::new("/nonexistent")));
     }
 }

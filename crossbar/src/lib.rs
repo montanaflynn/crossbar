@@ -10,6 +10,7 @@ pub mod launch;
 pub mod layout;
 pub mod mux;
 pub mod paths;
+pub mod restart;
 pub mod status;
 pub mod util;
 pub mod watch;

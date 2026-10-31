@@ -278,6 +278,60 @@ pub fn respawn(term: Term, session: &str, pane: &str, window: &str, neighbor: Op
     }
 }
 
+/// The pid of PANE's own process (what the pane was started with).
+pub fn pane_pid(term: Term, session: &str, pane: &str) -> Option<i64> {
+    match term {
+        Term::Tmux => tmux_s(&["display-message", "-p", "-t", pane, "#{pane_pid}"]).1.trim().parse().ok(),
+        Term::Rex => rex_json(&["block", "call", "-s", session, "-b", pane, "process"])?["child"]["pid"].as_i64(),
+    }
+}
+
+/// Run ARGV in DIR in PANE's place, keeping the layout around it; returns
+/// the pane it runs in. tmux respawns the pane; Rex opens a pane next to it,
+/// swaps the two and closes the old one.
+pub fn replace(term: Term, session: &str, pane: &str, dir: &str, label: &str, argv: &[String]) -> Result<String, String> {
+    match term {
+        Term::Tmux => {
+            let mut args = strings(&["respawn-pane", "-k", "-t", pane, "-c", dir]);
+            args.extend_from_slice(argv);
+            let (code, _, err) = tmux(&args);
+            if code == 0 {
+                Ok(pane.to_string())
+            } else {
+                Err(if err.is_empty() { "could not respawn the pane".into() } else { err })
+            }
+        }
+        Term::Rex => {
+            let focused = rex_json(&["window", "ls", "-s", session, "--json"])
+                .and_then(|v| v["windows"].as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .any(|w| w["focused_block_id"].as_str() == Some(pane));
+            let mut args = strings(&["split", "-s", session, "-b", pane, "-c", dir, "--split=right", "--ratio", "50", "--focus=false", "--json"]);
+            if !label.is_empty() {
+                args.extend(strings(&["--label", label]));
+            }
+            args.push("--".into());
+            args.extend_from_slice(argv);
+            let (code, out, err) = rex(&args);
+            let v: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
+            let new = match first_block(&v) {
+                Some(p) if code == 0 => p,
+                _ => return Err(if err.is_empty() { "could not open the new pane".into() } else { err }),
+            };
+            let (code, _, err) = rex(&strings(&["block", "swap", "-s", session, &new, pane]));
+            if code != 0 {
+                util::warn(format!("could not put the new pane in the old one's place: {err}"));
+            }
+            rex(&strings(&["block", "close", "-s", session, pane]));
+            if focused {
+                rex(&strings(&["focus", "-s", session, &new]));
+            }
+            Ok(new)
+        }
+    }
+}
+
 /// Type TEXT into PANE, then Enter as a write of its own after a pause:
 /// text and Enter in one write reach Claude Code as a paste, which it
 /// doesn't submit.

@@ -13,6 +13,7 @@ use crate::launch::{self, pane_argv};
 use crate::layout::{self, Home, OPERATOR, SUPERVISOR};
 use crate::mux::{self, Term};
 use crate::paths::{self, Node, Want};
+use crate::restart;
 use crate::status::{self, Flat, Looker};
 use crate::util::{self, die, short, strings};
 
@@ -43,6 +44,9 @@ exchange), `stats` is its project. `/central/stats` is absolute, `..` goes up.
   status PATH                        its Claude's state
   tail PATH [N]                      the last N lines of its screen (default 60)
   wait PATH [SECONDS]                wait until it stops working (default 600)
+  restart PATH                       quit its Claude (only if idle or done; your own: once this
+                                     turn ends) and start it again in its pane with today's role
+                                     prompt, resuming its conversation
   rm [-y] [-f] PATH                  an agent: close its tab, and remove its worktree if clean and
                                      merged (refuses while it works, is blocked or has uncommitted
                                      changes, unless -f); a project or an exchange: kill its
@@ -92,6 +96,7 @@ pub fn main(args: Vec<String>) {
         "status" => cmd_status(&home, rest),
         "tail" => cmd_tail(&home, rest),
         "wait" => cmd_wait(&home, rest),
+        "restart" => cmd_restart(&home, rest),
         "rm" => cmd_rm(&home, rest),
         "watch" => cmd_watch(),
         "board" => cmd_board(&home, rest),
@@ -397,8 +402,24 @@ fn new_agent(home: &Home, e: &str, p: Option<&str>, name: &str, brief_from: Opti
 
 // ---- run (what panes run) ----------------------------------------------------
 
-fn cmd_run(home: &Home, args: Vec<String>) {
-    let usage = "cbar run [--pane] supervisor|operator|board|agent [PATH] [--no-worktree]";
+/// Take `FLAG VALUE` (or `FLAG=VALUE`) out of ARGS, before any `--`.
+fn take_value(args: &mut Vec<String>, flag: &str, usage: &str) -> Option<String> {
+    let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    let i = args[..end].iter().position(|a| a == flag || a.starts_with(&format!("{flag}=")))?;
+    let a = args.remove(i);
+    if let Some(v) = a.strip_prefix(&format!("{flag}=")) {
+        return Some(v.to_string());
+    }
+    if i >= args.len() || args[i] == "--" {
+        die(format!("{flag} takes a value (usage: {usage})"));
+    }
+    Some(args.remove(i))
+}
+
+fn cmd_run(home: &Home, mut args: Vec<String>) {
+    let usage = "cbar run [--pane] supervisor|operator|board|agent [PATH] [--no-worktree] [--resume SESSION]";
+    let resume = take_value(&mut args, "--resume", usage);
+    let resume: Vec<String> = resume.map(|id| vec!["--resume".into(), id]).unwrap_or_default();
     let a = parse(&args, &["--pane", "--no-worktree"], usage);
     let pane = a.has("--pane");
     if pane {
@@ -428,7 +449,7 @@ fn cmd_run(home: &Home, args: Vec<String>) {
                 short(&dir),
                 short(&dir)
             );
-            claude(&[format!("{e} supervisor"), prompt], &[], pane)
+            claude(&[format!("{e} supervisor"), prompt], &resume, pane)
         }
         "operator" => {
             home.require_layout();
@@ -450,7 +471,7 @@ fn cmd_run(home: &Home, args: Vec<String>) {
                 short(&dir),
                 short(&dir)
             );
-            claude(&[format!("{p} operator"), prompt], &[], pane)
+            claude(&[format!("{p} operator"), prompt], &resume, pane)
         }
         "agent" => {
             let Node::Agent { exchange, project, name } = &node else { die("cbar run agent PATH: PATH is an agent") };
@@ -459,11 +480,14 @@ fn cmd_run(home: &Home, args: Vec<String>) {
             if !a.has("--no-worktree") {
                 extra = vec!["-w".to_string(), name.clone()];
             }
-            let ask = format!("Read {} and do the task it describes.", brief.display());
             let (mut argv, envs) = launch::claude_cmd();
             argv.extend(["-n".to_string(), name.clone()]);
             argv.extend(extra);
-            argv.push(ask);
+            if resume.is_empty() {
+                argv.push(format!("Read {} and do the task it describes.", brief.display()));
+            } else {
+                argv.extend(resume);
+            }
             launch::run(&argv, &envs, pane)
         }
         "board" => {
@@ -848,6 +872,142 @@ fn wait(t: &Target, f: Flat, limit: u64) {
         st = refresh();
     }
     println!("{}: {}", t.tab, if st.is_empty() { "not running Claude" } else { &st });
+}
+
+// ---- restart -----------------------------------------------------------------
+
+/// What `cbar run` starts in NODE's pane, and the path it's given.
+fn restart_role(node: &Node) -> (&'static str, String) {
+    match node {
+        Node::Exchange(e) => ("supervisor", format!("/{e}")),
+        Node::Agent { exchange, project: None, name } if name == SUPERVISOR => ("supervisor", format!("/{exchange}")),
+        Node::Project(e, p) => ("operator", format!("/{e}/{p}")),
+        Node::Agent { exchange, project: Some(p), name } if name == OPERATOR => ("operator", format!("/{exchange}/{p}")),
+        _ => ("agent", format!("/{}", node.path())),
+    }
+}
+
+/// cbar restart PATH: quit its Claude and start it again in the same pane,
+/// with what `cbar run` gives it today, resuming its conversation. Your own
+/// pane is restarted by a detached cbar once your turn ends (--wait).
+fn cmd_restart(home: &Home, args: Vec<String>) {
+    let usage = "cbar restart PATH";
+    let a = parse(&args, &["--wait"], usage);
+    let Some(path) = a.pos.first() else { die(format!("usage: {usage}")) };
+    let waiting = a.has("--wait");
+    home.require_layout();
+    let node = resolve(home, path, Want::Existing);
+    let t = target(home, &node);
+    let f = t.get();
+    let session = if t.term == Term::Rex { t.sid.clone() } else { t.session.clone() };
+    let own = mux::here_terminal() == Some(t.term) && mux::here_pane().as_deref() == Some(f.pane.block_id.as_str());
+    let block = f.pane.block_id.clone();
+    let found = || {
+        let root = mux::pane_pid(t.term, &session, &block).unwrap_or_else(|| die(format!("could not find the process in {}'s pane", t.path)));
+        restart::find(root).unwrap_or_else(|| {
+            die(format!("found no Claude session file for {}'s Claude in {}; left it running", t.path, short(restart::sessions_dir())))
+        })
+    };
+    if own && !waiting {
+        // this Claude runs us: it can't quit until this turn ends, and when it
+        // does it may take its children with it, so a cbar of its own does it
+        let cs = found();
+        let logs = home.root.join("logs");
+        let _ = fs::create_dir_all(&logs);
+        let log = logs.join(format!("restart-{}.log", t.path.replace('/', "-")));
+        let out = fs::File::create(&log).unwrap_or_else(|e| die(format!("{}: {e}", short(&log))));
+        let err = out.try_clone().unwrap_or_else(|e| die(format!("{}: {e}", short(&log))));
+        let mut cmd = Command::new(launch::self_exe());
+        cmd.args(["restart", "--wait", &format!("/{}", t.path)]).stdin(std::process::Stdio::null()).stdout(out).stderr(err);
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        if let Err(e) = cmd.spawn() {
+            die(format!("could not start the restart: {e}"));
+        }
+        println!("restarting {} (session {}) once this turn ends; log: {}", t.path, cs.id, short(&log));
+        return;
+    }
+    let f = if waiting { wait_ready(&t, &f, Duration::from_secs(1800)) } else { f };
+    let st = &f.pane.state;
+    if st != "idle" && st != "done" {
+        let what = if st.is_empty() { "not running Claude" } else { st };
+        die(format!("{} is {what}; only restart an idle or done Claude", t.tab));
+    }
+    let cs = found();
+    let (role, rpath) = restart_role(&node);
+    println!("restarting {}: quitting its Claude (pid {}, session {})", t.path, cs.pid, cs.id);
+    if let Err(e) = mux::send_line(t.term, &session, &f.pane.block_id, "/exit") {
+        util::warn(format!("could not type /exit: {e}"));
+    }
+    if !restart::wait_exit(cs.pid, Duration::from_secs(20)) {
+        println!("it didn't quit on /exit; sending it SIGTERM");
+        unsafe { libc::kill(cs.pid as libc::pid_t, libc::SIGTERM) };
+        if !restart::wait_exit(cs.pid, Duration::from_secs(5)) {
+            unsafe { libc::kill(cs.pid as libc::pid_t, libc::SIGKILL) };
+            if !restart::wait_exit(cs.pid, Duration::from_secs(5)) {
+                die(format!("its Claude (pid {}) won't quit; left the pane as it is", cs.pid));
+            }
+        }
+    }
+    let dir = Some(cs.cwd.clone())
+        .filter(|d| Path::new(d).is_dir())
+        .or_else(|| work_dir(home, node.exchange().unwrap_or_default(), node.project()))
+        .unwrap_or_else(|| util::home().to_string_lossy().into_owned());
+    let mut sub = vec![role, rpath.as_str()];
+    if role == "agent" {
+        // already in its worktree, if it has one: that's where its conversation is
+        sub.push("--no-worktree");
+    }
+    sub.extend(["--resume", cs.id.as_str()]);
+    let pane = mux::replace(t.term, &session, &f.pane.block_id, &dir, &f.pane.label, &pane_argv(&sub)).unwrap_or_else(|e| die(e));
+    // tell it why its system prompt changed, once it's up
+    let until = Instant::now() + Duration::from_secs(90);
+    loop {
+        let st = t.panes().into_iter().find(|g| g.pane.block_id == pane).map(|g| g.pane.state).unwrap_or_default();
+        if st == "idle" || st == "done" {
+            break;
+        }
+        if Instant::now() >= until {
+            println!("restarted {} in {}, but its Claude isn't idle yet ({}); didn't tell it why", t.path, short(&dir), if st.is_empty() { "starting" } else { &st });
+            return;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    let why = if role == "agent" {
+        format!("crossbar restarted you on {} (cbar restart, same conversation); carry on with your task.", env!("CARGO_PKG_VERSION"))
+    } else {
+        format!("crossbar restarted you on {} with the current {role} prompt (cbar restart, same conversation); re-arm cbar watch and carry on.", env!("CARGO_PKG_VERSION"))
+    };
+    if let Err(e) = mux::send_line(t.term, &session, &pane, &why) {
+        util::warn(format!("could not tell it why: {e}"));
+    }
+    println!("restarted {} in {}, resuming session {}", t.path, short(&dir), cs.id);
+}
+
+/// Wait (up to LIMIT) until the pane's Claude is idle or done twice in a row.
+fn wait_ready(t: &Target, f: &Flat, limit: Duration) -> Flat {
+    let until = Instant::now() + limit;
+    let mut seen = 0;
+    loop {
+        let g = t.panes().into_iter().find(|g| g.pane.block_id == f.pane.block_id).unwrap_or_else(|| die(format!("{}'s pane is gone", t.path)));
+        if g.pane.state == "idle" || g.pane.state == "done" {
+            seen += 1;
+            if seen >= 2 {
+                return g;
+            }
+        } else {
+            seen = 0;
+        }
+        if Instant::now() >= until {
+            die(format!("{} is still {} after {}s; didn't restart it", t.path, g.pane.state, limit.as_secs()));
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
 }
 
 // ---- rm --------------------------------------------------------------------

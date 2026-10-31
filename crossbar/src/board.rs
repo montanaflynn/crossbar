@@ -880,7 +880,44 @@ fn terminal_size() -> (u16, u16) {
     terminal::size().unwrap_or((80, 24))
 }
 
+/// Whether this board's pane is gone: its terminal hung up or no longer
+/// answers, or the process that started it (the pane's shell or cbar) died.
+fn pane_gone(parent: libc::pid_t) -> bool {
+    unsafe {
+        if libc::getppid() != parent || libc::tcgetpgrp(0) < 0 {
+            return true;
+        }
+        let mut fd = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+        libc::poll(&mut fd, 1, 0) > 0 && fd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
+    }
+}
+
+/// Exit when the pane goes away, or soon after SIGTERM/SIGHUP even if the
+/// main loop is stuck (a hung-up terminal can keep crossterm reading forever).
+fn watchdog() {
+    let parent = unsafe { libc::getppid() };
+    std::thread::spawn(move || {
+        let mut asked: Option<Instant> = None;
+        loop {
+            std::thread::sleep(Duration::from_millis(250));
+            if pane_gone(parent) {
+                unsafe { libc::_exit(0) };
+            }
+            if QUIT.load(Ordering::Relaxed) {
+                // give the main loop a moment to put the terminal back
+                let t = *asked.get_or_insert_with(Instant::now);
+                if t.elapsed() > Duration::from_secs(1) {
+                    unsafe { libc::_exit(0) };
+                }
+            }
+        }
+    });
+}
+
 fn live(mut board: Board) {
+    if unsafe { libc::isatty(0) } == 1 {
+        watchdog();
+    }
     {
         let (shared, look) = (board.shared.clone(), board.look.clone());
         let scope = board.scope().map(String::from);
@@ -1153,22 +1190,23 @@ mod tests {
 
     #[test]
     fn picks_an_exchanges_sessions() {
-        let data = vec![g("main/stats"), g("other"), g("main"), g("work/stats"), g("work")];
-        let ex: Vec<String> = vec!["main".into(), "work".into()];
+        let data = vec![g("central/stats"), g("other"), g("central"), g("work/stats"), g("work")];
+        let ex: Vec<String> = vec!["central".into(), "work".into()];
         let labels = |v: &View| pick(&data, v, &ex).into_iter().map(|(g, _)| g.label).collect::<Vec<_>>();
-        assert_eq!(labels(&View::Exchange("main".into())), ["main", "main/stats"]);
-        assert_eq!(labels(&View::All), ["main", "main/stats", "work", "work/stats", "other"]);
-        assert_eq!(title("main/stats", &View::Exchange("main".into())), "stats");
-        assert_eq!(title("main/stats", &View::All), "main/stats");
+        assert_eq!(labels(&View::Exchange("central".into())), ["central", "central/stats"]);
+        assert_eq!(labels(&View::All), ["central", "central/stats", "work", "work/stats", "other"]);
+        assert_eq!(title("central/stats", &View::Exchange("central".into())), "stats");
+        assert_eq!(title("central/stats", &View::All), "central/stats");
     }
 
     #[test]
     fn scores_main_boards() {
-        assert_eq!(fit_score("main", "main", "main", "main"), Some(0));
-        assert_eq!(fit_score("", "central", "main", "main"), Some(1));
-        assert_eq!(fit_score("*", "x", "main", "main"), Some(2));
-        assert_eq!(fit_score("work", "work", "main", "main"), None);
-        assert_eq!(fit_score("", "work", "work", "main"), Some(0));
+        assert_eq!(fit_score("central", "central", "central", "central"), Some(0));
+        assert_eq!(fit_score("", "central", "central", "central"), Some(0));
+        assert_eq!(fit_score("", "other", "central", "central"), Some(1));
+        assert_eq!(fit_score("*", "x", "central", "central"), Some(2));
+        assert_eq!(fit_score("work", "work", "central", "central"), None);
+        assert_eq!(fit_score("", "work", "work", "central"), Some(0));
     }
 
     #[test]
@@ -1187,10 +1225,10 @@ mod tests {
             since: "2m".into(),
             since_at: String::new(),
         };
-        let data = vec![(Group { session_id: "s".into(), label: "main/stats".into(), mux: "tmux".into(), window_id: None }, vec![p])];
-        let f = render(&data, &View::Exchange("main".into()), 60, 0, None, "main", false);
+        let data = vec![(Group { session_id: "s".into(), label: "central/stats".into(), mux: "tmux".into(), window_id: None }, vec![p])];
+        let f = render(&data, &View::Exchange("central".into()), 60, 0, None, "central", false);
         let text: Vec<String> = f.lines.iter().map(|l| l.spans.iter().map(|s| s.content.to_string()).collect()).collect();
-        assert!(text[0].starts_with("◇ switchboard main · agents & panes by session"));
+        assert!(text[0].starts_with("◇ switchboard central · agents & panes by session"));
         assert_eq!(text[1], "✓ 1 done");
         assert!(text[3].starts_with("╭─ stats tmux ~/x ─") && text[3].ends_with("─ 1 ─╮"), "{}", text[3]);
         assert!(text[4].contains("✓ fix-x            done") && text[4].ends_with("2m │"), "{}", text[4]);

@@ -1,6 +1,6 @@
 //! The ~/.crossbar layout ($CROSSBAR_HOME):
 //!
-//!   config.toml                     default_exchange = "main"
+//!   config.toml                     default_exchange = "central"
 //!   operator.md, supervisor.md      role prompts, version, bin/
 //!   exchanges/<exchange>/
 //!     exchange.toml                 name, terminal, created
@@ -9,8 +9,8 @@
 //!       project.toml                name, path, terminal, created
 //!       briefs/ reports/            the operator's agents
 //!
-//! An exchange's supervisor runs in the session named after it (`main`), each
-//! of its projects in `<exchange>/<project>` (`main/stats`).
+//! An exchange's supervisor runs in the session named after it (`central`), each
+//! of its projects in `<exchange>/<project>` (`central/stats`).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -19,7 +19,7 @@ use crate::mux::Term;
 use crate::util;
 
 pub const SEP: char = '/';
-pub const DEFAULT_EXCHANGE: &str = "main";
+pub const DEFAULT_EXCHANGE: &str = "central";
 /// Reserved tab names: a project's operator and an exchange's supervisor.
 pub const OPERATOR: &str = "operator";
 pub const SUPERVISOR: &str = "supervisor";
@@ -135,17 +135,23 @@ impl Home {
         !self.exchanges_dir().is_dir() && (real_dir(self.root.join("projects")) || real_dir(self.root.join("central")))
     }
 
-    /// Stop with a pointer to MIGRATING.md if this home has the 0.4 layout.
+    /// Stop, saying what to move, if this home has the 0.4 layout.
     pub fn require_layout(&self) {
         let left = self.root.join("projects");
+        let ex = self.exchange_dir(&self.default_exchange());
         if !self.old_layout() && fs::symlink_metadata(&left).is_ok_and(|m| m.is_dir()) {
-            util::warn(format!("{} is a 0.4 folder: what's in it isn't in exchanges/ (see MIGRATING.md)", util::short(&left)));
+            util::warn(format!(
+                "{} is a 0.4 folder that cbar no longer reads: move each project in it to {}/",
+                util::short(&left),
+                util::short(ex.join("projects"))
+            ));
         }
         if self.old_layout() {
             util::die(format!(
-                "{} has the 0.4 layout (central/, projects/); move it into exchanges/{} first (see MIGRATING.md)",
+                "{} has the 0.4 layout, which cbar no longer reads: move central/ to {}/ (central.toml becomes exchange.toml) and each projects/<name>/ to {}/<name>/",
                 util::short(&self.root),
-                DEFAULT_EXCHANGE
+                util::short(&ex),
+                util::short(ex.join("projects"))
             ));
         }
     }
@@ -264,16 +270,16 @@ mod tests {
     #[test]
     fn registers_and_reads_back() {
         let h = sandbox("reg");
-        h.register_exchange("main", Term::Tmux).unwrap();
-        h.register_project("main", "stats", Path::new("/tmp/a \"b\""), Term::Rex).unwrap();
-        let created = toml_get(&h.project_toml("main", "stats"), "created").unwrap();
-        h.register_project("main", "stats", Path::new("/tmp/c"), Term::Tmux).unwrap();
-        assert_eq!(toml_get(&h.project_toml("main", "stats"), "created").unwrap(), created);
+        h.register_exchange("central", Term::Tmux).unwrap();
+        h.register_project("central", "stats", Path::new("/tmp/a \"b\""), Term::Rex).unwrap();
+        let created = toml_get(&h.project_toml("central", "stats"), "created").unwrap();
+        h.register_project("central", "stats", Path::new("/tmp/c"), Term::Tmux).unwrap();
+        assert_eq!(toml_get(&h.project_toml("central", "stats"), "created").unwrap(), created);
         assert!(crate::util::parse_iso(&created).is_some(), "{created}");
-        let text = fs::read_to_string(h.project_toml("main", "stats")).unwrap();
+        let text = fs::read_to_string(h.project_toml("central", "stats")).unwrap();
         assert!(text.parse::<toml::Table>().unwrap()["created"].is_datetime(), "{text}");
-        let p = h.project("main", "stats").unwrap();
-        assert_eq!((p.path.as_str(), p.terminal, p.session()), ("/tmp/c", Term::Tmux, "main/stats".to_string()));
+        let p = h.project("central", "stats").unwrap();
+        assert_eq!((p.path.as_str(), p.terminal, p.session()), ("/tmp/c", Term::Tmux, "central/stats".to_string()));
         assert_eq!(h.exchanges().len(), 1);
         assert!(!h.old_layout());
         let _ = fs::remove_dir_all(&h.root);

@@ -26,9 +26,34 @@ Applied to both sides' output before comparing; the summary says which strip rul
   its name; project `alpha`'s session (`session 'alpha'`, `=alpha`, a JSON `"label": "alpha"`) is
   `central/alpha`; `~/.crossbar/projects/` is `~/.crossbar/exchanges/central/projects/` and
   `~/.crossbar/central/` is `~/.crossbar/exchanges/central/`.
-- Strip rule `deprecation-note` (new side's stderr): `cbar: \`cbar agent …\` is deprecated; use
-  \`cbar …\``. The old forms are kept as aliases with a note (exchanges.md), so cases that run an
-  old form would otherwise all differ by that line.
+- 0.5.2 dropped the 0.4 forms (`cbar agent …`, `cbar board --here`): where the old side runs one,
+  the new side runs its path form (`cbar new TASK`, `ls .`, `status`, `tail`, `send`, `wait`, `rm`,
+  `cbar board .`), so those cases compare what each form prints.
+
+## agent-ls
+
+0.5.2 dropped `cbar agent ls`; its path form `cbar ls .` prints the project's tree (its operator, then its agents) instead of the TAB/STATE/SINCE/MESSAGE table (v052.md addendum).
+
+```diff
+--- old
++++ new
+@@ -1,8 +1,8 @@
+-TAB                  STATE    SINCE MESSAGE
+-operator             idle <age> 
+-t-done               done <age> finished the thing
+-t-ask                blocked <age> allow npm test?
+-t-boom               error <age> tests failed
+-t-busy               working <age> 
+-t-chat               idle <age> 
++NAME       TERMINAL  PATH      SESSION  CLAUDE
++alpha      tmux      ~/repo-a  running  operator idle
++├─ t-done                               done <age>
++├─ t-ask                                blocked <age>
++├─ t-boom                               error <age>
++├─ t-busy                               working <age>
++└─ t-chat                               idle <age>
+ --- exit 0
+```
 
 ## agent-new-t-nogit
 
@@ -56,6 +81,22 @@ The same: the agent in a non-git project starts without `-w` (the stub prints wh
 +worktree: -
  brief: t-nogit.md
  state: done | no repo here
+```
+
+## board-central-once
+
+0.5.2: an exchange's supervisor starts in its `path`, else in the exchange's own folder, not `~`, where Claude Code asks to trust the folder every time (two-bugs.md).
+
+```diff
+--- old
++++ new
+@@ -2,5 +2,5 @@
+ ○ 1 idle
+ 
+-╭─ supervisor ~ ─────────────────────────────────────────────────────────────────────────────── 1 ─╮
++╭─ supervisor ~/.crossbar/exchanges/central ─────────────────────────────────────────────── 1 ─╮
+ │ ○ claude           idle <age> │
+ ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## board-here-json (rex)
@@ -592,6 +633,29 @@ Scoped to one session, 0.4 passed Rex's raw window record through as each group 
     "window_id": "<window>"
 ```
 
+## board-main-json
+
+The same: the supervisor's and main board's panes start in the exchange's folder, not `~`.
+
+```diff
+--- old
++++ new
+@@ -9,5 +9,5 @@
+    {
+     "block_id": "<pane>",
+-    "cwd": "~",
++    "cwd": "~/.crossbar/exchanges/central",
+     "kind": "",
+     "label": "shell",
+@@ -22,5 +22,5 @@
+    {
+     "block_id": "<pane>",
+-    "cwd": "~",
++    "cwd": "~/.crossbar/exchanges/central",
+     "kind": "",
+     "label": "switchboard",
+```
+
 ## board-main-json (rex)
 
 The Rust board's `--json` gives every group its `mux`, Rex ones too (0.4 left it out for Rex and readers assumed rex). Confirm: `--json` is documented output.
@@ -621,16 +685,20 @@ The Rust board's `--json` gives every group its `mux`, Rex ones too (0.4 left it
 
 ## board-main-once
 
-The main board shows one exchange and names it in its subtitle (exchanges.md).
+The main board shows one exchange and names it in its subtitle (exchanges.md). Since 0.5.2 the exchange's card shows its folder, not `~`: its supervisor starts there (two-bugs.md).
 
 ```diff
 --- old
 +++ new
-@@ -1,3 +1,3 @@
+@@ -1,6 +1,6 @@
 -◇ switchboard agents & panes by session                                                        HH:MM
 +◇ switchboard central · agents & panes by session                                              HH:MM
  ◆ 1 blocked  ✗ 1 error  ✓ 2 done  ⠋ 1 working  ○ 4 idle
  
+-╭─ central tmux ~ ───────────────────────────────────────────────────────────────────────────── 0 ─╮
++╭─ central tmux ~/.crossbar/exchanges/central ───────────────────────────────────────────── 0 ─╮
+ │ ○ supervisor       idle <age> │
+ ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## board-main-once-color
@@ -640,11 +708,15 @@ The same as board-main-once, with colors.
 ```diff
 --- old
 +++ new
-@@ -1,3 +1,3 @@
+@@ -1,6 +1,6 @@
 -[b fg=#be95ff]◇[/] [b fg=#be95ff]switchboard[/] [fg=#7b7c7e]agents[/] [fg=#7b7c7e]&[/] [fg=#7b7c7e]panes[/] [fg=#7b7c7e]by[/] [fg=#7b7c7e]session[/]                                                        [fg=#7b7c7e]HH:MM[/]
 +[b fg=#be95ff]◇[/] [b fg=#be95ff]switchboard[/] [fg=#7b7c7e]central[/] [fg=#7b7c7e]·[/] [fg=#7b7c7e]agents[/] [fg=#7b7c7e]&[/] [fg=#7b7c7e]panes[/] [fg=#7b7c7e]by[/] [fg=#7b7c7e]session[/]                                              [fg=#7b7c7e]HH:MM[/]
  [fg=#ee5396]◆[/] [fg=#ee5396]1[/] [fg=#ee5396]blocked[/]  [fg=#ff7eb6]✗[/] [fg=#ff7eb6]1[/] [fg=#ff7eb6]error[/]  [fg=#25be6a]✓[/] [fg=#25be6a]2[/] [fg=#25be6a]done[/]  [fg=#78a9ff]⠋[/] [fg=#78a9ff]1[/] [fg=#78a9ff]working[/]  [fg=#7b7c7e]○[/] [fg=#7b7c7e]4[/] [fg=#7b7c7e]idle[/]
  
+-[fg=#353535]╭─[/] [b fg=#f2f4f8]central[/] [fg=#525253]tmux[/] [fg=#7b7c7e]~[/] [fg=#353535]─────────────────────────────────────────────────────────────────────────────[/] [fg=#7b7c7e]0[/] [fg=#353535]─╮[/]
++[fg=#353535]╭─[/] [b fg=#f2f4f8]central[/] [fg=#525253]tmux[/] [fg=#7b7c7e]~/.crossbar/exchanges/central[/] [fg=#353535]─────────────────────────────────────────────[/] [fg=#7b7c7e]0[/] [fg=#353535]─╮[/]
+ [fg=#353535]│[/] [fg=#7b7c7e]○[/] [fg=#f2f4f8]supervisor[/]       [fg=#7b7c7e]idle[/] <age> [fg=#353535]│[/]
+ [fg=#353535]╰──────────────────────────────────────────────────────────────────────────────────────────────────╯[/]
 ```
 
 ## err-agent-new-exists
@@ -662,9 +734,65 @@ Names the session, which now carries the exchange (`central/alpha`).
  --- exit 1
 ```
 
-## err-agent-unknown
+## err-agent-new-nobrief
 
-Any diff. `cbar agent` is a deprecated alias; its help maps each form to the path-based one.
+The path form `cbar new TASK` from a project's pane could also mean a new project, so its error adds a hint (v052.md addendum: path forms instead of `cbar agent …`).
+
+```diff
+--- old
++++ new
+@@ -1,4 +1,4 @@
+ 
+ --- stderr
+-cbar: write the brief first: ~/.crossbar/exchanges/central/projects/alpha/briefs/t-nobrief.md
++cbar: write the brief first: ~/.crossbar/exchanges/central/projects/alpha/briefs/t-nobrief.md (a project, not an agent? cbar new ../t-nobrief)
+ --- exit 1
+```
+
+## err-agent-send-usage
+
+The path form's usage line: `cbar send PATH TEXT` (v052.md addendum).
+
+```diff
+--- old
++++ new
+@@ -1,4 +1,4 @@
+ 
+ --- stderr
+-cbar: usage: cbar agent send TASK TEXT
++cbar: usage: cbar send PATH TEXT
+ --- exit 1
+```
+
+## err-agent-status-none
+
+The path form reports a path that resolves to nothing the same way every command does (`nothing at 'nope' (cbar ls)`), as in err-open-none (v052.md addendum).
+
+```diff
+--- old
++++ new
+@@ -1,4 +1,4 @@
+ 
+ --- stderr
+-cbar: no tab 'nope' in this session (cbar agent ls)
++cbar: nothing at 'nope' (cbar ls)
+ --- exit 1
+```
+
+## err-close-self
+
+`cbar rm operator` names what `operator` is, the tab that runs its session, and what to do instead (v052.md addendum: `cbar rm` instead of `cbar agent close`).
+
+```diff
+--- old
++++ new
+@@ -1,4 +1,4 @@
+ 
+ --- stderr
+-cbar: 'operator' is this tab
++cbar: 'operator' runs its session; rm the project instead
+ --- exit 1
+```
 
 ## err-new-nodir
 
@@ -764,13 +892,11 @@ Any diff. The usage text is the new path-based CLI (exchanges.md).
 
 Any diff. The usage text is the new path-based CLI (exchanges.md).
 
-## help-agent
-
-Any diff. `cbar agent` is a deprecated alias; its help maps each form to the path-based one.
-
 ## ls
 
 `cbar ls` is a tree: the exchange with its supervisor on top, projects under it, their agents under them; the last column is CLAUDE (central.md, exchanges.md).
+
+0.5.2: the exchange's PATH is its folder (`path` in exchange.toml, else `~/.crossbar/exchanges/central`), not `~` (two-bugs.md).
 
 ```diff
 --- old
@@ -779,16 +905,16 @@ Any diff. `cbar agent` is a deprecated alias; its help maps each form to the pat
 -NAME   TERMINAL  PATH      SESSION  OPERATOR
 -alpha  tmux      ~/repo-a  running  idle
 -beta   tmux      ~/repo-b  running  idle
-+NAME           TERMINAL  PATH      SESSION  CLAUDE
-+central        tmux      ~         running  supervisor idle
-+├─ alpha       tmux      ~/repo-a  running  operator idle
-+│  ├─ t-done                                done <age>
-+│  ├─ t-ask                                 blocked <age>
-+│  ├─ t-boom                                error <age>
-+│  ├─ t-busy                                working <age>
-+│  └─ t-chat                                idle <age>
-+└─ beta        tmux      ~/repo-b  running  operator idle
-+   └─ t-nogit                               done <age>
++NAME           TERMINAL  PATH                               SESSION  CLAUDE
++central        tmux      ~/.crossbar/exchanges/central  running  supervisor idle
++├─ alpha       tmux      ~/repo-a                           running  operator idle
++│  ├─ t-done                                                         done <age>
++│  ├─ t-ask                                                          blocked <age>
++│  ├─ t-boom                                                         error <age>
++│  ├─ t-busy                                                         working <age>
++│  └─ t-chat                                                         idle <age>
++└─ beta        tmux      ~/repo-b                           running  operator idle
++   └─ t-nogit                                                        done <age>
  --- exit 0
 ```
 
@@ -818,7 +944,7 @@ Any diff. `cbar agent` is a deprecated alias; its help maps each form to the pat
 
 ## ls-after-rm
 
-The same tree as ls, after t-done and t-boom were closed and beta removed.
+The same tree as ls, after t-done and t-boom were closed and beta removed. The exchange's PATH as in ls.
 
 ```diff
 --- old
@@ -826,13 +952,13 @@ The same tree as ls, after t-done and t-boom were closed and beta removed.
 @@ -1,3 +1,8 @@
 -NAME   TERMINAL  PATH      SESSION  OPERATOR
 -alpha  tmux      ~/repo-a  running  idle
-+NAME          TERMINAL  PATH      SESSION  CLAUDE
-+central       tmux      ~         running  supervisor idle
-+└─ alpha      tmux      ~/repo-a  running  operator idle
-+   ├─ t-ask                                blocked <age>
-+   ├─ t-busy                               working <age>
-+   ├─ t-chat                               done <age>
-+   └─ t-path                               idle <age>
++NAME          TERMINAL  PATH                               SESSION  CLAUDE
++central       tmux      ~/.crossbar/exchanges/central  running  supervisor idle
++└─ alpha      tmux      ~/repo-a                           running  operator idle
++   ├─ t-ask                                                         blocked <age>
++   ├─ t-busy                                                        working <age>
++   ├─ t-chat                                                        done <age>
++   └─ t-path                                                        idle <age>
  --- exit 0
 ```
 

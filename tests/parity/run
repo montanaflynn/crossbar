@@ -471,7 +471,8 @@ def setup(side):
         for task in agents:
             shutil.copy(os.path.join(HERE, "fixtures", "briefs", f"{task}.md"), s.briefs(project))
             if project in s.panes_at:
-                record(f"agent-new-{task}", s, s.run(["cbar", "agent", "new", task], pane=project))
+                new = ["cbar", "agent", "new", task] if s.name == "old" else ["cbar", "new", task]
+                record(f"agent-new-{task}", s, s.run(new, pane=project))
             want[(s.session(project), task)] = agents[task]
     wait_states(s, want)
 
@@ -539,7 +540,8 @@ def watch_case(case, side):
     if chat:
         side.mux.send_line(chat["sid"], chat["pane"], "ping")
     time.sleep(10)
-    record("watch-close-t-done", side, side.run(["cbar", "agent", "close", "t-done"], pane="alpha"))
+    close = ["cbar", "agent", "close", "t-done"] if side.name == "old" else ["cbar", "rm", "t-done"]
+    record("watch-close-t-done", side, side.run(close, pane="alpha"))
     time.sleep(10)
     if p.poll() is None:
         os.killpg(p.pid, signal.SIGTERM)
@@ -600,7 +602,6 @@ def cases():
         *[C(f"agent-new-{t}", None, run=setup_case) for ts in AGENTS.values() for t in ts],
         # read-only
         C("help", ["cbar", "help"]),
-        C("help-agent", ["cbar", "agent", "help"]),
         C("version", ["cbar", "version"]),
         C("ls", ["cbar", "ls"]),
         C("board-main-once", ["switchboard", "--once"]),
@@ -610,52 +611,51 @@ def cases():
         C("board-local-once", ["switchboard", "--once", *alpha], ["switchboard", "--once", "--session", f"{EXCHANGE}/alpha"]),
         C("board-local-once-color", ["switchboard", "--once", *alpha], ["switchboard", "--once", "--session", f"{EXCHANGE}/alpha"], kind="color"),
         C("board-local-json", ["switchboard", "--json", *alpha], ["switchboard", "--json", "--session", f"{EXCHANGE}/alpha"], kind="json"),
-        C("board-here-once", ["cbar", "board", "--here", "--once"], pane="alpha"),
-        C("board-here-json", ["cbar", "board", "--here", "--json"], pane="alpha", kind="json"),
-        C("agent-ls", ["cbar", "agent", "ls"], pane="alpha"),
-        C("agent-status-done", ["cbar", "agent", "status", "t-done"], pane="alpha"),
-        C("agent-status-ask", ["cbar", "agent", "status", "t-ask"], pane="alpha"),
-        C("agent-status-boom", ["cbar", "agent", "status", "t-boom"], pane="alpha"),
+        # the 0.4 `cbar agent …` and `cbar board --here` forms (old) against their path forms (new)
+        C("board-here-once", ["cbar", "board", "--here", "--once"], ["cbar", "board", ".", "--once"], pane="alpha"),
+        C("board-here-json", ["cbar", "board", "--here", "--json"], ["cbar", "board", ".", "--json"], pane="alpha", kind="json"),
+        C("agent-ls", ["cbar", "agent", "ls"], ["cbar", "ls", "."], pane="alpha"),
+        C("agent-status-done", ["cbar", "agent", "status", "t-done"], ["cbar", "status", "t-done"], pane="alpha"),
+        C("agent-status-ask", ["cbar", "agent", "status", "t-ask"], ["cbar", "status", "t-ask"], pane="alpha"),
+        C("agent-status-boom", ["cbar", "agent", "status", "t-boom"], ["cbar", "status", "t-boom"], pane="alpha"),
         C("path-status-done", ["cbar", "agent", "status", "t-done"], ["cbar", "status", "alpha/t-done"], pane="alpha"),
-        C("agent-tail-done", ["cbar", "agent", "tail", "t-done", "4"], pane="alpha"),
-        C("agent-tail-nogit", ["cbar", "agent", "tail", "t-nogit", "4"], pane="beta"),
+        C("agent-tail-done", ["cbar", "agent", "tail", "t-done", "4"], ["cbar", "tail", "t-done", "4"], pane="alpha"),
+        C("agent-tail-nogit", ["cbar", "agent", "tail", "t-nogit", "4"], ["cbar", "tail", "t-nogit", "4"], pane="beta"),
         C("path-tail-done", ["cbar", "agent", "tail", "t-done", "4"], ["cbar", "tail", "alpha/t-done", "4"], pane="alpha"),
         C("open-dry", ["cbar", "open", "-n", "alpha"]),
         # errors and exit codes
         C("err-unknown-command", ["cbar", "frob"]),
-        C("err-agent-unknown", ["cbar", "agent", "frob"], pane="alpha"),
-        C("err-agent-outside", ["cbar", "agent", "ls"]),
         C("err-new-usage", ["cbar", "new"]),
         C("err-new-nodir", ["cbar", "new", "gamma", "/nonexistent/parity", "--tmux"]),
         C("err-new-option", ["cbar", "new", "gamma", "--frob"]),
-        C("err-agent-new-nobrief", ["cbar", "agent", "new", "t-nobrief"], pane="alpha"),
-        C("err-agent-new-badname", ["cbar", "agent", "new", "bad name"], pane="alpha"),
-        C("err-agent-new-exists", ["cbar", "agent", "new", "t-done"], pane="alpha"),
-        C("err-agent-status-none", ["cbar", "agent", "status", "nope"], pane="alpha"),
-        C("err-agent-send-usage", ["cbar", "agent", "send", "t-chat"], pane="alpha"),
-        C("err-send-busy", ["cbar", "agent", "send", "t-busy", "hello"], pane="alpha"),
-        C("err-send-blocked", ["cbar", "agent", "send", "t-ask", "yes"], pane="alpha"),
-        C("err-close-busy", ["cbar", "agent", "close", "t-busy"], pane="alpha"),
-        C("err-close-blocked", ["cbar", "agent", "close", "t-ask"], pane="alpha"),
-        C("err-close-self", ["cbar", "agent", "close", "operator"], pane="alpha"),
+        C("err-agent-new-nobrief", ["cbar", "agent", "new", "t-nobrief"], ["cbar", "new", "t-nobrief"], pane="alpha"),
+        C("err-agent-new-badname", ["cbar", "agent", "new", "bad name"], ["cbar", "new", "bad name"], pane="alpha"),
+        C("err-agent-new-exists", ["cbar", "agent", "new", "t-done"], ["cbar", "new", "t-done"], pane="alpha"),
+        C("err-agent-status-none", ["cbar", "agent", "status", "nope"], ["cbar", "status", "nope"], pane="alpha"),
+        C("err-agent-send-usage", ["cbar", "agent", "send", "t-chat"], ["cbar", "send", "t-chat"], pane="alpha"),
+        C("err-send-busy", ["cbar", "agent", "send", "t-busy", "hello"], ["cbar", "send", "t-busy", "hello"], pane="alpha"),
+        C("err-send-blocked", ["cbar", "agent", "send", "t-ask", "yes"], ["cbar", "send", "t-ask", "yes"], pane="alpha"),
+        C("err-close-busy", ["cbar", "agent", "close", "t-busy"], ["cbar", "rm", "t-busy"], pane="alpha"),
+        C("err-close-blocked", ["cbar", "agent", "close", "t-ask"], ["cbar", "rm", "t-ask"], pane="alpha"),
+        C("err-close-self", ["cbar", "agent", "close", "operator"], ["cbar", "rm", "operator"], pane="alpha"),
         C("err-rm-none", ["cbar", "rm", "-y", "nope"]),
         C("err-rm-notty", ["cbar", "rm", "beta"]),
         C("err-open-none", ["cbar", "open", "-n", "nope"]),
         C("err-board-nosession", ["switchboard", "--once", "--session", "nope"]),
         C("err-board-watch", ["switchboard", "--watch"]),
-        C("wait-busy", ["cbar", "agent", "wait", "t-busy", "3"], pane="alpha"),
+        C("wait-busy", ["cbar", "agent", "wait", "t-busy", "3"], ["cbar", "wait", "t-busy", "3"], pane="alpha"),
         # these change things, in this order
         C("path-new-agent", None, run=path_new_case),
         C("new-project-again", ["cbar", "new", "alpha", "{home}/repo-a", "{term}"]),
-        C("send-chat", ["cbar", "agent", "send", "t-chat", "hello"], pane="alpha"),
-        C("wait-chat", ["cbar", "agent", "wait", "t-chat", "30"], pane="alpha"),
-        C("tail-chat", ["cbar", "agent", "tail", "t-chat", "8"], pane="alpha"),
+        C("send-chat", ["cbar", "agent", "send", "t-chat", "hello"], ["cbar", "send", "t-chat", "hello"], pane="alpha"),
+        C("wait-chat", ["cbar", "agent", "wait", "t-chat", "30"], ["cbar", "wait", "t-chat", "30"], pane="alpha"),
+        C("tail-chat", ["cbar", "agent", "tail", "t-chat", "8"], ["cbar", "tail", "t-chat", "8"], pane="alpha"),
         C("path-send-chat", ["cbar", "agent", "send", "t-chat", "again"], ["cbar", "send", "alpha/t-chat", "again"], pane="alpha"),
         C("path-wait-chat", ["cbar", "agent", "wait", "t-chat", "30"], ["cbar", "wait", "alpha/t-chat", "30"], pane="alpha"),
         C("watch", None, run=watch_case, timeout=120),
         C("watch-close-t-done", None, run=setup_case),
         C("watch-restart", None, run=watch_restart_case, timeout=60),
-        C("close-boom", ["cbar", "agent", "close", "-f", "t-boom"], pane="alpha"),
+        C("close-boom", ["cbar", "agent", "close", "-f", "t-boom"], ["cbar", "rm", "-f", "t-boom"], pane="alpha"),
         C("rm-project", ["cbar", "rm", "-y", "beta"]),
         C("ls-after-rm", ["cbar", "ls"]),
         C("leftovers", None, run=lambda c, s: None),   # filled in after the side's server stops
@@ -667,7 +667,6 @@ def cases():
 ANSI = re.compile(r"\x1b\[([0-9;]*)m")
 OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 STRIP_RULES = {   # rule: (side it applies to, pattern removed from stderr) — intended.md lists these
-    "deprecation-note": ("new", re.compile(r"^cbar: `[^`]*` is deprecated; use `[^`]*`\n?", re.M)),
 }
 
 

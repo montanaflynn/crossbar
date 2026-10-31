@@ -16,8 +16,9 @@ Applied to both sides' output before comparing; the summary says which strip rul
   and `layer:` ids likewise). A case whose Rex diff can't match its tmux one has a `## CASE (rex)`
   entry of its own, used only with `--rex`.
 - Times: the board clock `HH:MM`; in `--json`, a non-empty `since` is `<age>`; at the end of a line
-  after a state (`cbar ls`'s `done 1m`), `<age>`. Other ages in text (board rows, `cbar agent ls`)
-  are left as they are: those cases run within each side's first minute.
+  after a state (`cbar ls`'s `done 1m`), `<age>`; a board row's age at its right edge and
+  `cbar agent ls`'s SINCE, `<age>` too: a slow side (Rex, the 0.4 board) can reach those cases
+  minutes after its agents set their states.
 - Escape sequences: removed, except in `-color` cases, where each run of text is shown with its
   style (`[fg=#be95ff b]…[/]`), however the SGR codes were written.
 - `--json`: groups sorted by label, panes by tab and label, keys sorted.

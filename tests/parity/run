@@ -747,6 +747,11 @@ def common(side, text):
     text = re.sub(r"\b\d\d:\d\d\b", "HH:MM", text)
     # `cbar ls` puts an agent's age after its state; later cases run past a minute
     text = re.sub(r"\b(idle|working|done|blocked|error) (now|\d+[smhd])$", r"\1 <age>", text, flags=re.M)
+    # a board row's age at its right edge, and `cbar agent ls`'s SINCE: a slow side
+    # (Rex, the 0.4 board) can reach these cases minutes after its agents set their states
+    text = re.sub(r" +(now|\d+[smhd]) │$", " <age> │", text, flags=re.M)
+    text = re.sub(r" +\[fg=#[0-9a-f]{6}\](now|\d+[smhd])\[/\] (\[fg=#[0-9a-f]{6}\]│\[/\])$", r" <age> \2", text, flags=re.M)
+    text = re.sub(r"^(\S+ +(?:idle|working|done|blocked|error)) +(now|\d+[smhd]) +", r"\1 <age> ", text, flags=re.M)
     # the same tokens for tmux and Rex ids, so one accepted diff fits both
     text = re.sub(r"(?<![\w.])%\d+\b", "<pane>", text)
     text = re.sub(r"(?<![\w.])@\d+\b", "<window>", text)
@@ -873,11 +878,17 @@ def main():
 
 
 def reap(root):
-    """Kill anything still running from the sandbox (its path in the command line)."""
-    p = sh(["pgrep", "-f", root])
-    pids = [int(x) for x in p.stdout.split() if x.isdigit() and int(x) != os.getpid()]
-    if not pids:
-        return
+    """Kill anything still running from the sandbox (its path in the command line),
+    after giving it two seconds to exit on its own once its server has stopped."""
+    deadline = time.time() + 2
+    while True:
+        p = sh(["pgrep", "-f", root])
+        pids = [int(x) for x in p.stdout.split() if x.isdigit() and int(x) != os.getpid()]
+        if not pids:
+            return
+        if time.time() >= deadline:
+            break
+        time.sleep(0.2)
     ps = sh(["ps", "-o", "pid=,args=", "-p", ",".join(map(str, pids))]).stdout
     for pid in pids:
         try:

@@ -1153,22 +1153,23 @@ mod tests {
 
     #[test]
     fn picks_an_exchanges_sessions() {
-        let data = vec![g("main/stats"), g("other"), g("main"), g("work/stats"), g("work")];
-        let ex: Vec<String> = vec!["main".into(), "work".into()];
+        let data = vec![g("central/stats"), g("other"), g("central"), g("work/stats"), g("work")];
+        let ex: Vec<String> = vec!["central".into(), "work".into()];
         let labels = |v: &View| pick(&data, v, &ex).into_iter().map(|(g, _)| g.label).collect::<Vec<_>>();
-        assert_eq!(labels(&View::Exchange("main".into())), ["main", "main/stats"]);
-        assert_eq!(labels(&View::All), ["main", "main/stats", "work", "work/stats", "other"]);
-        assert_eq!(title("main/stats", &View::Exchange("main".into())), "stats");
-        assert_eq!(title("main/stats", &View::All), "main/stats");
+        assert_eq!(labels(&View::Exchange("central".into())), ["central", "central/stats"]);
+        assert_eq!(labels(&View::All), ["central", "central/stats", "work", "work/stats", "other"]);
+        assert_eq!(title("central/stats", &View::Exchange("central".into())), "stats");
+        assert_eq!(title("central/stats", &View::All), "central/stats");
     }
 
     #[test]
     fn scores_main_boards() {
-        assert_eq!(fit_score("main", "main", "main", "main"), Some(0));
-        assert_eq!(fit_score("", "central", "main", "main"), Some(1));
-        assert_eq!(fit_score("*", "x", "main", "main"), Some(2));
-        assert_eq!(fit_score("work", "work", "main", "main"), None);
-        assert_eq!(fit_score("", "work", "work", "main"), Some(0));
+        assert_eq!(fit_score("central", "central", "central", "central"), Some(0));
+        assert_eq!(fit_score("", "central", "central", "central"), Some(0));
+        assert_eq!(fit_score("", "other", "central", "central"), Some(1));
+        assert_eq!(fit_score("*", "x", "central", "central"), Some(2));
+        assert_eq!(fit_score("work", "work", "central", "central"), None);
+        assert_eq!(fit_score("", "work", "work", "central"), Some(0));
     }
 
     #[test]
@@ -1187,10 +1188,10 @@ mod tests {
             since: "2m".into(),
             since_at: String::new(),
         };
-        let data = vec![(Group { session_id: "s".into(), label: "main/stats".into(), mux: "tmux".into(), window_id: None }, vec![p])];
-        let f = render(&data, &View::Exchange("main".into()), 60, 0, None, "main", false);
+        let data = vec![(Group { session_id: "s".into(), label: "central/stats".into(), mux: "tmux".into(), window_id: None }, vec![p])];
+        let f = render(&data, &View::Exchange("central".into()), 60, 0, None, "central", false);
         let text: Vec<String> = f.lines.iter().map(|l| l.spans.iter().map(|s| s.content.to_string()).collect()).collect();
-        assert!(text[0].starts_with("◇ switchboard main · agents & panes by session"));
+        assert!(text[0].starts_with("◇ switchboard central · agents & panes by session"));
         assert_eq!(text[1], "✓ 1 done");
         assert!(text[3].starts_with("╭─ stats tmux ~/x ─") && text[3].ends_with("─ 1 ─╮"), "{}", text[3]);
         assert!(text[4].contains("✓ fix-x            done") && text[4].ends_with("2m │"), "{}", text[4]);

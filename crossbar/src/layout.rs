@@ -1,6 +1,6 @@
 //! The ~/.crossbar layout ($CROSSBAR_HOME):
 //!
-//!   config.toml                     default_exchange = "main"
+//!   config.toml                     default_exchange = "central"
 //!   operator.md, supervisor.md      role prompts, version, bin/
 //!   exchanges/<exchange>/
 //!     exchange.toml                 name, terminal, created
@@ -9,8 +9,8 @@
 //!       project.toml                name, path, terminal, created
 //!       briefs/ reports/            the operator's agents
 //!
-//! An exchange's supervisor runs in the session named after it (`main`), each
-//! of its projects in `<exchange>/<project>` (`main/stats`).
+//! An exchange's supervisor runs in the session named after it (`central`), each
+//! of its projects in `<exchange>/<project>` (`central/stats`).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -19,7 +19,7 @@ use crate::mux::Term;
 use crate::util;
 
 pub const SEP: char = '/';
-pub const DEFAULT_EXCHANGE: &str = "main";
+pub const DEFAULT_EXCHANGE: &str = "central";
 /// Reserved tab names: a project's operator and an exchange's supervisor.
 pub const OPERATOR: &str = "operator";
 pub const SUPERVISOR: &str = "supervisor";
@@ -270,16 +270,16 @@ mod tests {
     #[test]
     fn registers_and_reads_back() {
         let h = sandbox("reg");
-        h.register_exchange("main", Term::Tmux).unwrap();
-        h.register_project("main", "stats", Path::new("/tmp/a \"b\""), Term::Rex).unwrap();
-        let created = toml_get(&h.project_toml("main", "stats"), "created").unwrap();
-        h.register_project("main", "stats", Path::new("/tmp/c"), Term::Tmux).unwrap();
-        assert_eq!(toml_get(&h.project_toml("main", "stats"), "created").unwrap(), created);
+        h.register_exchange("central", Term::Tmux).unwrap();
+        h.register_project("central", "stats", Path::new("/tmp/a \"b\""), Term::Rex).unwrap();
+        let created = toml_get(&h.project_toml("central", "stats"), "created").unwrap();
+        h.register_project("central", "stats", Path::new("/tmp/c"), Term::Tmux).unwrap();
+        assert_eq!(toml_get(&h.project_toml("central", "stats"), "created").unwrap(), created);
         assert!(crate::util::parse_iso(&created).is_some(), "{created}");
-        let text = fs::read_to_string(h.project_toml("main", "stats")).unwrap();
+        let text = fs::read_to_string(h.project_toml("central", "stats")).unwrap();
         assert!(text.parse::<toml::Table>().unwrap()["created"].is_datetime(), "{text}");
-        let p = h.project("main", "stats").unwrap();
-        assert_eq!((p.path.as_str(), p.terminal, p.session()), ("/tmp/c", Term::Tmux, "main/stats".to_string()));
+        let p = h.project("central", "stats").unwrap();
+        assert_eq!((p.path.as_str(), p.terminal, p.session()), ("/tmp/c", Term::Tmux, "central/stats".to_string()));
         assert_eq!(h.exchanges().len(), 1);
         assert!(!h.old_layout());
         let _ = fs::remove_dir_all(&h.root);

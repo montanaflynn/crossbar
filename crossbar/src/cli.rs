@@ -23,7 +23,7 @@ pub fn usage() -> String {
 
 A PATH is exchange/project/agent, relative to where you are: inside a project,
 `fix-x` is its agent; inside an exchange (or outside crossbar, in the default
-exchange), `stats` is its project. `/main/stats` is absolute, `..` goes up.
+exchange), `stats` is its project. `/central/stats` is absolute, `..` goes up.
 
   new PROJECT [DIR] [--tmux|--rex]   register a project and start its session with an operator
                                      and a local switchboard (DIR: this folder; terminal: the
@@ -513,11 +513,7 @@ fn cmd_up(home: &Home, args: Vec<String>) {
     let legacy = e == home.default_exchange();
 
     let dir = util::home().to_string_lossy().into_owned();
-    if legacy && !mux::session_running(&e, term) && all.iter().any(|f| f.group == "central" && f.mux == term.as_str()) {
-        println!("{e}: running as 'central' (its 0.4 name): rename that session to '{e}'");
-    } else {
-        up_one(&all, &e, &dir, term, SUPERVISOR, &format!("/{e}"));
-    }
+    up_one(&all, &e, &dir, term, SUPERVISOR, &format!("/{e}"));
     for p in home.projects(&e) {
         if !Path::new(&p.path).is_dir() {
             util::warn(format!("{}: no folder {}; skipped it", p.name, short(&p.path)));
@@ -659,12 +655,9 @@ impl Tree<'_> {
             }
             return;
         }
-        let (s, c) = self.state(&x.name, term, SUPERVISOR, legacy.then_some("central"));
+        let (s, c) = self.state(&x.name, term, SUPERVISOR, None);
         self.row("", &x.name, term.as_str(), "~", &s, &c);
-        let mut agents = self.agents(&x.name, term, SUPERVISOR);
-        if agents.is_empty() && legacy && !has(&x.name, term) {
-            agents = self.agents("central", term, SUPERVISOR);
-        }
+        let agents = self.agents(&x.name, term, SUPERVISOR);
         let n = projects.len() + agents.len();
         let mut i = 0;
         for p in &projects {
@@ -1111,7 +1104,7 @@ fn cmd_agent(home: &Home, args: Vec<String>) {
     let here = paths::here(home);
     let in_tab = |task: &str| match &here {
         Node::Project(e, p) => Node::Agent { exchange: e.clone(), project: Some(p.clone()), name: task.into() },
-        n => Node::Agent { exchange: n.exchange().unwrap_or("main").into(), project: None, name: task.into() },
+        n => Node::Agent { exchange: n.exchange().map(String::from).unwrap_or_else(|| home.default_exchange()), project: None, name: task.into() },
     };
     match sub {
         "new" => {
@@ -1123,7 +1116,7 @@ fn cmd_agent(home: &Home, args: Vec<String>) {
         "ls" => {
             let t = target(home, &match &here {
                 Node::Project(..) => here.clone(),
-                n => Node::Exchange(n.exchange().unwrap_or("main").into()),
+                n => Node::Exchange(n.exchange().map(String::from).unwrap_or_else(|| home.default_exchange())),
             });
             println!("{:<20} {:<8} {:<5} MESSAGE", "TAB", "STATE", "SINCE");
             for f in t.panes().iter().filter(|f| !f.pane.state.is_empty()) {

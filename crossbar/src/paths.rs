@@ -2,9 +2,9 @@
 //! names. Paths are relative to where you are: inside a project, `fix-x` is
 //! that project's agent; inside an exchange, `stats` is that exchange's
 //! project. A name that isn't found nearby is looked up a level higher, so
-//! `stats` still finds the project from inside another project. `/main/stats`
+//! `stats` still finds the project from inside another project. `/central/stats`
 //! is absolute; `..` steps up. A tab of the exchange's own session (the
-//! supervisor's agents) sits at a project's depth: `main/research`.
+//! supervisor's agents) sits at a project's depth: `central/research`.
 
 use crate::layout::{self, Home, OPERATOR, SUPERVISOR};
 use crate::mux;
@@ -62,7 +62,7 @@ impl Node {
         }
     }
 
-    /// The full path, e.g. main/stats/fix-x.
+    /// The full path, e.g. central/stats/fix-x.
     pub fn path(&self) -> String {
         match self {
             Node::Root => "/".into(),
@@ -226,11 +226,11 @@ mod tests {
         let root = std::env::temp_dir().join(format!("cbar-paths-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let h = Home { root };
-        for e in ["main", "work"] {
+        for e in ["central", "work"] {
             h.register_exchange(e, Term::Tmux).unwrap();
         }
-        h.register_project("main", "stats", Path::new("/tmp"), Term::Tmux).unwrap();
-        h.register_project("main", "grail", Path::new("/tmp"), Term::Tmux).unwrap();
+        h.register_project("central", "stats", Path::new("/tmp"), Term::Tmux).unwrap();
+        h.register_project("central", "grail", Path::new("/tmp"), Term::Tmux).unwrap();
         h.register_project("work", "stats", Path::new("/tmp"), Term::Tmux).unwrap();
         h
     }
@@ -242,33 +242,33 @@ mod tests {
     #[test]
     fn resolves_by_depth_and_place() {
         let h = home("resolve");
-        let tabs = |s: &str, t: &str| (s, t) == ("main/stats", "fix-x") || (s, t) == ("main", "research");
+        let tabs = |s: &str, t: &str| (s, t) == ("central/stats", "fix-x") || (s, t) == ("central", "research");
         let r = |here: &Node, p: &str, w: Want| resolve(&h, here, p, w, &tabs);
-        let ex = Node::Exchange("main".into());
-        let pr = Node::Project("main".into(), "grail".into());
+        let ex = Node::Exchange("central".into());
+        let pr = Node::Project("central".into(), "grail".into());
         let any = Want::Existing;
         let new = Want::New { agent: false };
 
-        assert_eq!(r(&ex, "stats", any), Ok(Node::Project("main".into(), "stats".into())));
-        assert_eq!(r(&ex, "stats/fix-x", any), Ok(agent("main", Some("stats"), "fix-x")));
+        assert_eq!(r(&ex, "stats", any), Ok(Node::Project("central".into(), "stats".into())));
+        assert_eq!(r(&ex, "stats/fix-x", any), Ok(agent("central", Some("stats"), "fix-x")));
         assert_eq!(r(&ex, "work/stats", any), Ok(Node::Project("work".into(), "stats".into())));
-        assert_eq!(r(&ex, "research", any), Ok(agent("main", None, "research")));
-        assert_eq!(r(&ex, "supervisor", any), Ok(agent("main", None, "supervisor")));
-        assert_eq!(r(&ex, "stats/operator", any), Ok(agent("main", Some("stats"), "operator")));
+        assert_eq!(r(&ex, "research", any), Ok(agent("central", None, "research")));
+        assert_eq!(r(&ex, "supervisor", any), Ok(agent("central", None, "supervisor")));
+        assert_eq!(r(&ex, "stats/operator", any), Ok(agent("central", Some("stats"), "operator")));
         assert!(r(&ex, "nope", any).is_err());
 
         // inside a project: its agents first, then the exchange's projects
-        assert_eq!(r(&pr, "stats", any), Ok(Node::Project("main".into(), "stats".into())));
-        assert_eq!(r(&pr, "../stats", any), Ok(Node::Project("main".into(), "stats".into())));
+        assert_eq!(r(&pr, "stats", any), Ok(Node::Project("central".into(), "stats".into())));
+        assert_eq!(r(&pr, "../stats", any), Ok(Node::Project("central".into(), "stats".into())));
         assert_eq!(r(&pr, "..", any), Ok(ex.clone()));
         assert_eq!(r(&pr, "/work/stats", any), Ok(Node::Project("work".into(), "stats".into())));
-        assert_eq!(r(&pr, "new-task", new), Ok(agent("main", Some("grail"), "new-task")));
+        assert_eq!(r(&pr, "new-task", new), Ok(agent("central", Some("grail"), "new-task")));
 
         // new things
-        assert_eq!(r(&ex, "fresh", new), Ok(Node::Project("main".into(), "fresh".into())));
-        assert_eq!(r(&ex, "fresh", Want::New { agent: true }), Ok(agent("main", None, "fresh")));
-        assert_eq!(r(&ex, "stats/fix-y", new), Ok(agent("main", Some("stats"), "fix-y")));
-        assert_eq!(r(&ex, "main/fresh", new), Ok(Node::Project("main".into(), "fresh".into())));
+        assert_eq!(r(&ex, "fresh", new), Ok(Node::Project("central".into(), "fresh".into())));
+        assert_eq!(r(&ex, "fresh", Want::New { agent: true }), Ok(agent("central", None, "fresh")));
+        assert_eq!(r(&ex, "stats/fix-y", new), Ok(agent("central", Some("stats"), "fix-y")));
+        assert_eq!(r(&ex, "central/fresh", new), Ok(Node::Project("central".into(), "fresh".into())));
         assert_eq!(r(&ex, "/personal", new), Ok(Node::Exchange("personal".into())));
         assert!(r(&ex, "nope/x/y", new).is_err());
         let _ = std::fs::remove_dir_all(&h.root);
@@ -277,11 +277,11 @@ mod tests {
     #[test]
     fn knows_where_it_is() {
         let h = home("here");
-        assert_eq!(here_from(&h, Some("main/stats")), Node::Project("main".into(), "stats".into()));
+        assert_eq!(here_from(&h, Some("central/stats")), Node::Project("central".into(), "stats".into()));
         assert_eq!(here_from(&h, Some("work")), Node::Exchange("work".into()));
-        assert_eq!(here_from(&h, Some("grail")), Node::Project("main".into(), "grail".into()));
-        assert_eq!(here_from(&h, Some("elsewhere")), Node::Exchange("main".into()));
-        assert_eq!(here_from(&h, None), Node::Exchange("main".into()));
+        assert_eq!(here_from(&h, Some("grail")), Node::Project("central".into(), "grail".into()));
+        assert_eq!(here_from(&h, Some("elsewhere")), Node::Exchange("central".into()));
+        assert_eq!(here_from(&h, None), Node::Exchange("central".into()));
         let _ = std::fs::remove_dir_all(&h.root);
     }
 }

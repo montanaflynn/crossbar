@@ -119,5 +119,5 @@ else
 fi
 case ":$PATH:" in *":$links:"*) ;; *) say "add $links to your PATH" ;; esac
 if [ ! -d "$dest/exchanges" ] && { [ -d "$dest/projects" ] || [ -d "$dest/central" ]; }; then
-  say "$dest has the 0.4 layout: run \`cbar migrate\` to move it into exchanges/main"
+  say "$dest has the 0.4 layout, which cbar no longer reads: move central/ to $dest/exchanges/central/ (central.toml becomes exchange.toml) and each projects/<name>/ to $dest/exchanges/central/projects/<name>/"
 fi

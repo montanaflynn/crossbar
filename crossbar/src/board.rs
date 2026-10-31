@@ -880,7 +880,44 @@ fn terminal_size() -> (u16, u16) {
     terminal::size().unwrap_or((80, 24))
 }
 
+/// Whether this board's pane is gone: its terminal hung up or no longer
+/// answers, or the process that started it (the pane's shell or cbar) died.
+fn pane_gone(parent: libc::pid_t) -> bool {
+    unsafe {
+        if libc::getppid() != parent || libc::tcgetpgrp(0) < 0 {
+            return true;
+        }
+        let mut fd = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+        libc::poll(&mut fd, 1, 0) > 0 && fd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
+    }
+}
+
+/// Exit when the pane goes away, or soon after SIGTERM/SIGHUP even if the
+/// main loop is stuck (a hung-up terminal can keep crossterm reading forever).
+fn watchdog() {
+    let parent = unsafe { libc::getppid() };
+    std::thread::spawn(move || {
+        let mut asked: Option<Instant> = None;
+        loop {
+            std::thread::sleep(Duration::from_millis(250));
+            if pane_gone(parent) {
+                unsafe { libc::_exit(0) };
+            }
+            if QUIT.load(Ordering::Relaxed) {
+                // give the main loop a moment to put the terminal back
+                let t = *asked.get_or_insert_with(Instant::now);
+                if t.elapsed() > Duration::from_secs(1) {
+                    unsafe { libc::_exit(0) };
+                }
+            }
+        }
+    });
+}
+
 fn live(mut board: Board) {
+    if unsafe { libc::isatty(0) } == 1 {
+        watchdog();
+    }
     {
         let (shared, look) = (board.shared.clone(), board.look.clone());
         let scope = board.scope().map(String::from);

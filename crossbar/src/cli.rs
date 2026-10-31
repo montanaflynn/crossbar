@@ -309,6 +309,11 @@ fn new_project(home: &Home, e: &str, p: &str, dir: Option<&str>, term: Option<Te
         println!("session '{session}' already exists; registered it ({})", short(&dir));
         return;
     }
+    // as cbar up does: no second session next to one still under its 0.4 name
+    if e == home.default_exchange() && mux::session_running(p, term) {
+        println!("registered it ({}); its session runs as '{p}' (its 0.4 name): rename that session to '{session}'", short(&dir));
+        return;
+    }
     if let Err(err) = start_project(&session, &dir.to_string_lossy(), term) {
         die(err);
     }

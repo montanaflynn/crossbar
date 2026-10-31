@@ -76,8 +76,6 @@ has no worktrees; its agents all work in its folder.
   restarts you the same way once your turn ends; afterwards, start `cbar watch`
   again.
 
-The `cbar agent …` forms of these still work, with a note.
-
 ## Rules
 
 - Only stay inside this session. Other projects have their own operators;

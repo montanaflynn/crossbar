@@ -385,21 +385,6 @@ pub fn kill_session(term: Term, name: &str) -> bool {
     }
 }
 
-pub fn rename_session(term: Term, old: &str, new: &str) -> Result<(), String> {
-    let (code, _, err) = match term {
-        Term::Tmux => tmux_s(&["rename-session", "-t", &format!("={old}"), new]),
-        Term::Rex => match rex_session_id(old) {
-            Some(id) => rex(&strings(&["session", "rename", &id, new])),
-            None => (1, String::new(), format!("no session '{old}'")),
-        },
-    };
-    if code == 0 {
-        Ok(())
-    } else {
-        Err(err)
-    }
-}
-
 /// Whether ID is a tmux id ($session, @window, %pane).
 pub fn is_tmux_id(id: &str) -> bool {
     matches!(id.chars().next(), Some('$' | '@' | '%'))

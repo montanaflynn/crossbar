@@ -60,27 +60,8 @@ exchange), `stats` is its project. `/central/stats` is absolute, `..` goes up.
   update                             install the latest crossbar from GitHub
   version                            the installed version
   run supervisor|operator|board|agent  what cbar starts in the panes it makes
-  help                               this text
-
-Old forms still work, with a note: cbar operator, cbar supervisor, cbar agent …, cbar board --here."
+  help                               this text"
         .into()
-}
-
-fn agent_usage() -> String {
-    "usage: cbar agent COMMAND    (deprecated: each has a path-based form)
-
-  new TASK [--no-worktree]     cbar new TASK
-  ls                           cbar ls .
-  status TASK                  cbar status TASK
-  tail TASK [N]                cbar tail TASK [N]
-  send TASK TEXT               cbar send TASK TEXT
-  wait TASK [SECONDS]          cbar wait TASK [SECONDS]
-  close [-f] TASK              cbar rm [-f] TASK"
-        .into()
-}
-
-fn deprecated(old: &str, new: &str) {
-    eprintln!("cbar: `{old}` is deprecated; use `{new}`");
 }
 
 pub fn main(args: Vec<String>) {
@@ -105,15 +86,6 @@ pub fn main(args: Vec<String>) {
         "run" => cmd_run(&home, rest),
         "update" => cmd_update(&home),
         "version" | "--version" => println!("{}", version(&home)),
-        "supervisor" => {
-            deprecated("cbar supervisor", "cbar run supervisor");
-            cmd_run(&home, [vec!["supervisor".into()], rest].concat())
-        }
-        "operator" => {
-            deprecated("cbar operator", "cbar run operator");
-            cmd_run(&home, [vec!["operator".into()], rest].concat())
-        }
-        "agent" => cmd_agent(&home, rest),
         "help" | "-h" | "--help" => println!("{}", usage()),
         _ => {
             eprintln!("cbar: unknown command '{cmd}'");
@@ -235,7 +207,6 @@ fn cmd_new(home: &Home, args: Vec<String>) {
     let usage = "cbar new PATH [DIR|BRIEF] [--tmux|--rex] [--no-worktree] [--agent] [--exchange]";
     let a = parse(&args, &["--tmux", "--rex", "--no-worktree", "--agent", "--exchange"], usage);
     let Some(path) = a.pos.first() else { die(format!("usage: {usage}")) };
-    home.require_layout();
     if a.has("--exchange") {
         return new_exchange(home, path.trim_matches('/'), a.pos.get(1).map(String::as_str), a.term());
     }
@@ -328,11 +299,6 @@ fn new_project(home: &Home, e: &str, p: &str, dir: Option<&str>, term: Option<Te
     let session = layout::session_of(e, Some(p));
     if mux::session_running(&session, term) {
         println!("session '{session}' already exists; registered it ({})", short(&dir));
-        return;
-    }
-    // as cbar up does: no second session next to one still under its 0.4 name
-    if e == home.default_exchange() && mux::session_running(p, term) {
-        println!("registered it ({}); its session runs as '{p}' (its 0.4 name): rename that session to '{session}'", short(&dir));
         return;
     }
     if let Err(err) = start_project(&session, &dir.to_string_lossy(), term) {
@@ -448,14 +414,12 @@ fn cmd_run(home: &Home, mut args: Vec<String>) {
     let Some(role) = a.pos.first().map(String::as_str) else { die(format!("usage: {usage}")) };
     let node = match a.pos.get(1) {
         Some(p) => {
-            home.require_layout();
             resolve(home, p, if role == "agent" { Want::New { agent: true } } else { Want::Existing })
         }
         None => paths::here(home),
     };
     match role {
         "supervisor" => {
-            home.require_layout();
             let e = node.exchange().unwrap_or_else(|| die("no exchange here")).to_string();
             let dir = home.exchange_dir(&e);
             for d in ["briefs", "reports", "projects"] {
@@ -471,15 +435,10 @@ fn cmd_run(home: &Home, mut args: Vec<String>) {
             claude(&[format!("{e} supervisor"), prompt], &resume, pane)
         }
         "operator" => {
-            home.require_layout();
             let (e, p) = match &node {
                 Node::Project(e, p) => (e.clone(), p.clone()),
                 Node::Agent { exchange, project: Some(p), .. } => (exchange.clone(), p.clone()),
-                _ => {
-                    // not in a project's session: the folder's name, as before
-                    let cwd = std::env::current_dir().unwrap_or_default();
-                    (home.default_exchange(), util::basename(&cwd.to_string_lossy()).to_string())
-                }
+                _ => die("cbar run operator PATH: PATH is a project (or run it in a project's session)"),
             };
             let dir = home.project_dir(&e, &p);
             let _ = fs::create_dir_all(dir.join("briefs"));
@@ -540,7 +499,6 @@ const SHELLS: [&str; 9] = ["zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "
 
 fn cmd_up(home: &Home, args: Vec<String>) {
     let a = parse(&args, &["--tmux", "--rex"], "cbar up [EXCHANGE] [--tmux|--rex]");
-    home.require_layout();
     let e = match a.pos.first() {
         Some(e) => e.trim_matches('/').to_string(),
         None => paths::here(home).exchange().map(String::from).unwrap_or_else(|| home.default_exchange()),
@@ -558,7 +516,6 @@ fn cmd_up(home: &Home, args: Vec<String>) {
         }
     }
     let all = status::flatten(Looker::new(false).snapshot(None));
-    let legacy = e == home.default_exchange();
 
     match exchange_dir(home, &e) {
         Ok(dir) => up_one(&all, &e, &dir, term, SUPERVISOR, &format!("/{e}")),
@@ -570,10 +527,6 @@ fn cmd_up(home: &Home, args: Vec<String>) {
             continue;
         }
         let session = p.session();
-        if legacy && !mux::session_running(&session, p.terminal) && all.iter().any(|f| f.group == p.name && f.mux == p.terminal.as_str()) {
-            println!("{session}: running as '{}' (its 0.4 name): rename that session to '{session}'", p.name);
-            continue;
-        }
         up_one(&all, &session, &p.path, p.terminal, OPERATOR, &format!("/{session}"));
     }
 }
@@ -630,17 +583,10 @@ impl Tree<'_> {
         self.all.iter().filter(|f| f.group == name && f.mux == term.as_str()).collect()
     }
 
-    /// The SESSION and CLAUDE columns for session NAME's tab TAB; LEGACY is
-    /// its 0.4 name, looked at when NAME doesn't run.
-    fn state(&self, name: &str, term: Term, tab: &str, legacy: Option<&str>) -> (String, String) {
-        let mut panes = self.session_panes(name, term);
-        let mut session = "running".to_string();
-        if panes.is_empty() {
-            if let Some(old) = legacy {
-                panes = self.session_panes(old, term);
-                session = format!("running as '{old}' (0.4 name)");
-            }
-        }
+    /// The SESSION and CLAUDE columns for session NAME's tab TAB.
+    fn state(&self, name: &str, term: Term, tab: &str) -> (String, String) {
+        let panes = self.session_panes(name, term);
+        let session = "running".to_string();
         if panes.is_empty() {
             return ("not running".into(), "-".into());
         }
@@ -672,19 +618,16 @@ impl Tree<'_> {
         self.rows.push(strings(&[&format!("{prefix}{name}"), term, path, session, claude]));
     }
 
-    fn project(&mut self, p: &layout::Project, lead: &str, branch: &str, legacy: bool) {
+    fn project(&mut self, p: &layout::Project, lead: &str, branch: &str) {
         let session = p.session();
-        let (s, c) = self.state(&session, p.terminal, OPERATOR, legacy.then_some(p.name.as_str()));
+        let (s, c) = self.state(&session, p.terminal, OPERATOR);
         self.row(&format!("{lead}{branch}"), &p.name, p.terminal.as_str(), &short(&p.path), &s, &c);
         let under = format!("{lead}{}", match branch {
             "├─ " => "│  ",
             "└─ " => "   ",
             _ => "",
         });
-        let mut agents = self.agents(&session, p.terminal, OPERATOR);
-        if agents.is_empty() && legacy {
-            agents = self.agents(&p.name, p.terminal, OPERATOR);
-        }
+        let agents = self.agents(&session, p.terminal, OPERATOR);
         let n = agents.len();
         for (i, (tab, st)) in agents.into_iter().enumerate() {
             let b = if i + 1 < n { "├─ " } else { "└─ " };
@@ -693,26 +636,25 @@ impl Tree<'_> {
     }
 
     fn exchange(&mut self, home: &Home, x: &layout::Exchange, only_project: Option<&str>) {
-        let legacy = x.name == home.default_exchange();
         let has = |g: &str, t: Term| self.all.iter().any(|f| f.group == g && f.mux == t.as_str());
         let term = x.terminal.unwrap_or_else(|| if has(&x.name, Term::Tmux) { Term::Tmux } else { Term::Rex });
         let projects: Vec<_> = home.projects(&x.name).into_iter().filter(|p| only_project.is_none_or(|o| o == p.name)).collect();
         if let Some(only) = only_project {
             if let Some(p) = projects.first() {
-                self.project(p, "", "", legacy);
+                self.project(p, "", "");
             } else {
                 die(format!("no project '{}/{only}'", x.name));
             }
             return;
         }
-        let (s, c) = self.state(&x.name, term, SUPERVISOR, None);
+        let (s, c) = self.state(&x.name, term, SUPERVISOR);
         self.row("", &x.name, term.as_str(), &short(home.exchange_work_dir(&x.name)), &s, &c);
         let agents = self.agents(&x.name, term, SUPERVISOR);
         let n = projects.len() + agents.len();
         let mut i = 0;
         for p in &projects {
             i += 1;
-            self.project(p, "", if i < n { "├─ " } else { "└─ " }, legacy);
+            self.project(p, "", if i < n { "├─ " } else { "└─ " });
         }
         for (tab, st) in agents {
             i += 1;
@@ -723,7 +665,6 @@ impl Tree<'_> {
 
 fn cmd_ls(home: &Home, args: Vec<String>) {
     let a = parse(&args, &[], "cbar ls [PATH]");
-    home.require_layout();
     let node = a.pos.first().map(|p| resolve(home, p, Want::Existing));
     let exchanges = home.exchanges();
     if exchanges.is_empty() {
@@ -758,7 +699,6 @@ fn cmd_ls(home: &Home, args: Vec<String>) {
 fn cmd_open(home: &Home, args: Vec<String>) {
     let a = parse(&args, &["-n"], "cbar open [-n] PATH");
     let Some(path) = a.pos.first() else { die("usage: cbar open [-n] PATH") };
-    home.require_layout();
     let node = resolve(home, path, Want::Existing);
     let t = target(home, &node);
     let (window, pane) = match node {
@@ -807,7 +747,6 @@ fn cmd_open(home: &Home, args: Vec<String>) {
 }
 
 fn pane_target(home: &Home, path: &str) -> (Target, Flat) {
-    home.require_layout();
     let node = resolve(home, path, Want::Existing);
     let t = target(home, &node);
     let f = t.get();
@@ -916,7 +855,6 @@ fn cmd_restart(home: &Home, args: Vec<String>) {
     let a = parse(&args, &["--wait"], usage);
     let Some(path) = a.pos.first() else { die(format!("usage: {usage}")) };
     let waiting = a.has("--wait");
-    home.require_layout();
     let node = resolve(home, path, Want::Existing);
     let t = target(home, &node);
     let f = t.get();
@@ -1090,7 +1028,6 @@ fn count(dir: &Path) -> usize {
 fn cmd_rm(home: &Home, args: Vec<String>) {
     let a = parse(&args, &["-y", "--yes", "-f", "--force"], "cbar rm [-y] [-f] PATH");
     let Some(path) = a.pos.first() else { die("usage: cbar rm [-y] [-f] PATH") };
-    home.require_layout();
     let yes = a.has("-y") || a.has("--yes");
     let here = paths::here(home);
     let node = match paths::resolve(home, &here, path, Want::Existing, &paths::tab_exists) {
@@ -1273,14 +1210,13 @@ fn cmd_watch() {
 fn cmd_board(home: &Home, args: Vec<String>) {
     let mut argv = vec![switchboard_path()];
     for a in &args {
-        if a == "--here" {
-            deprecated("cbar board --here", "cbar run board");
-        }
         if a.starts_with('-') {
+            if !["--all", "--once", "--json"].contains(&a.as_str()) {
+                die(format!("cbar board: unknown option {a} (usage: cbar board [EXCHANGE|PROJECT] [--all] [--once|--json])"));
+            }
             argv.push(a.clone());
             continue;
         }
-        home.require_layout();
         match resolve(home, a, Want::Existing) {
             Node::Exchange(e) => argv.extend(["--exchange".to_string(), e]),
             n @ (Node::Project(..) | Node::Agent { .. }) => argv.extend(["--session".to_string(), n.session().unwrap()]),
@@ -1288,81 +1224,6 @@ fn cmd_board(home: &Home, args: Vec<String>) {
         }
     }
     launch::run(&argv, &[], false)
-}
-
-// ---- agent (deprecated) ------------------------------------------------------
-
-fn cmd_agent(home: &Home, args: Vec<String>) {
-    let (sub, rest) = match args.split_first() {
-        Some((s, r)) => (s.as_str(), r.to_vec()),
-        None => ("help", Vec::new()),
-    };
-    let new_form = match sub {
-        "new" => "cbar new TASK",
-        "ls" => "cbar ls .",
-        "status" => "cbar status TASK",
-        "tail" => "cbar tail TASK [N]",
-        "send" => "cbar send TASK TEXT",
-        "wait" => "cbar wait TASK [SECONDS]",
-        "close" => "cbar rm [-f] TASK",
-        "" | "help" | "-h" | "--help" => return println!("{}", agent_usage()),
-        _ => {
-            eprintln!("cbar: unknown agent command '{sub}'");
-            eprintln!("{}", agent_usage());
-            std::process::exit(1)
-        }
-    };
-    deprecated(&format!("cbar agent {sub}"), new_form);
-    if mux::here_terminal().is_none() {
-        die("run this inside a project's tmux or Rex pane");
-    }
-    home.require_layout();
-    let here = paths::here(home);
-    let in_tab = |task: &str| match &here {
-        Node::Project(e, p) => Node::Agent { exchange: e.clone(), project: Some(p.clone()), name: task.into() },
-        n => Node::Agent { exchange: n.exchange().map(String::from).unwrap_or_else(|| home.default_exchange()), project: None, name: task.into() },
-    };
-    match sub {
-        "new" => {
-            let a = parse(&rest, &["--no-worktree"], "cbar agent new TASK [--no-worktree]");
-            let Some(task) = a.pos.first() else { die("usage: cbar agent new TASK [--no-worktree]") };
-            let Node::Agent { exchange, project, name } = in_tab(task) else { unreachable!() };
-            new_agent(home, &exchange, project.as_deref(), &name, None, !a.has("--no-worktree"), false);
-        }
-        "ls" => {
-            let t = target(home, &match &here {
-                Node::Project(..) => here.clone(),
-                n => Node::Exchange(n.exchange().map(String::from).unwrap_or_else(|| home.default_exchange())),
-            });
-            println!("{:<20} {:<8} {:<5} MESSAGE", "TAB", "STATE", "SINCE");
-            for f in t.panes().iter().filter(|f| !f.pane.state.is_empty()) {
-                println!("{:<20} {:<8} {:<5} {}", f.pane.tab, f.pane.state, f.pane.since, f.pane.msg);
-            }
-        }
-        "close" => {
-            let a = parse(&rest, &["-f", "--force"], "cbar agent close [-f] TASK");
-            let Some(task) = a.pos.first() else { die("usage: cbar agent close [-f] TASK") };
-            let node = in_tab(task);
-            close_agent(home, &node, node.exchange().unwrap(), node.project(), a.has("-f") || a.has("--force"));
-        }
-        _ => {
-            let Some(task) = rest.first() else { die(format!("usage: {new_form}")) };
-            let node = in_tab(task);
-            let t = target(home, &node);
-            let f = t.find().unwrap_or_else(|| die(format!("no tab '{task}' in this session (cbar agent ls)")));
-            match sub {
-                "status" => println!("{}", if f.pane.state.is_empty() { "none" } else { &f.pane.state }),
-                "tail" => tail(&t, &f, rest.get(1).and_then(|n| n.parse().ok()).unwrap_or(60)),
-                "send" => {
-                    if rest.len() < 2 {
-                        die("usage: cbar agent send TASK TEXT");
-                    }
-                    send_to(&t, &f, &rest[1..].join(" "))
-                }
-                _ => wait(&t, f, rest.get(1).and_then(|n| n.parse().ok()).unwrap_or(600)),
-            }
-        }
-    }
 }
 
 // ---- version, update -----------------------------------------------------------

@@ -141,34 +141,6 @@ impl Home {
         self.root.join("config.toml")
     }
 
-    /// Whether this home still has the 0.4 layout (central/ and projects/ as
-    /// real folders, no exchanges/).
-    pub fn old_layout(&self) -> bool {
-        let real_dir = |p: PathBuf| fs::symlink_metadata(&p).map(|m| m.is_dir()).unwrap_or(false);
-        !self.exchanges_dir().is_dir() && (real_dir(self.root.join("projects")) || real_dir(self.root.join("central")))
-    }
-
-    /// Stop, saying what to move, if this home has the 0.4 layout.
-    pub fn require_layout(&self) {
-        let left = self.root.join("projects");
-        let ex = self.exchange_dir(&self.default_exchange());
-        if !self.old_layout() && fs::symlink_metadata(&left).is_ok_and(|m| m.is_dir()) {
-            util::warn(format!(
-                "{} is a 0.4 folder that cbar no longer reads: move each project in it to {}/",
-                util::short(&left),
-                util::short(ex.join("projects"))
-            ));
-        }
-        if self.old_layout() {
-            util::die(format!(
-                "{} has the 0.4 layout, which cbar no longer reads: move central/ to {}/ (central.toml becomes exchange.toml) and each projects/<name>/ to {}/<name>/",
-                util::short(&self.root),
-                util::short(&ex),
-                util::short(ex.join("projects"))
-            ));
-        }
-    }
-
     pub fn default_exchange(&self) -> String {
         toml_get(&self.config(), "default_exchange").filter(|s| valid_name(s)).unwrap_or_else(|| DEFAULT_EXCHANGE.into())
     }
@@ -310,7 +282,6 @@ mod tests {
         let p = h.project("central", "stats").unwrap();
         assert_eq!((p.path.as_str(), p.terminal, p.session()), ("/tmp/c", Term::Tmux, "central/stats".to_string()));
         assert_eq!(h.exchanges().len(), 1);
-        assert!(!h.old_layout());
         let _ = fs::remove_dir_all(&h.root);
     }
 
@@ -335,14 +306,6 @@ mod tests {
         assert!(fs::read_to_string(&f).unwrap().parse::<toml::Table>().is_ok());
         assert_eq!(expand_home("~"), util::home());
         assert_eq!(expand_home("~x/y"), PathBuf::from("~x/y"));
-        let _ = fs::remove_dir_all(&h.root);
-    }
-
-    #[test]
-    fn old_layout_old_layout() {
-        let h = sandbox("old");
-        fs::create_dir_all(h.root.join("projects/stats")).unwrap();
-        assert!(h.old_layout());
         let _ = fs::remove_dir_all(&h.root);
     }
 

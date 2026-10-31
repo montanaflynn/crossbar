@@ -52,9 +52,8 @@ fn reports(look: &Looker, home: &Home, scope: &str, label: &str) -> HashMap<Stri
         }
     };
     let name_of = |p: &Pane| if p.tab.is_empty() { p.program.clone() } else { p.tab.clone() };
-    // an exchange's session (or, in a 0.4 layout, `central`)
-    let exchange = home.exchange_exists(label) || (label == "central" && home.old_layout());
-    if !exchange {
+    // an exchange's session
+    if !home.exchange_exists(label) {
         for (_, panes) in look.snapshot(Some(scope)) {
             for p in &panes {
                 add(name_of(p), p);

@@ -120,12 +120,10 @@ changed the role prompts. It finds the pane's Claude session id in
 that doesn't do it), starts `cbar run … --resume <id>` in the same pane (tmux respawns it; Rex puts
 a new pane in its place), and once it's up types a line telling it why. Restarting your own pane
 (`cbar restart operator` from the operator) hands off to a detached cbar that waits until your turn
-ends; its log is in `~/.crossbar/logs/`.
-
-The 0.4 forms still work and print a note: `cbar operator` and `cbar supervisor` (now
-`cbar run …`), `cbar board --here` (`cbar run board`), and
-`cbar agent new|ls|status|tail|send|wait|close` (`cbar new`, `ls .`, `status`, `tail`, `send`,
-`wait`, `rm`).
+ends; its log is in `~/.crossbar/logs/`. When Claude asks on `/exit`, cbar answers only these, with
+Enter: keep the worktree (an agent started with `-w`), and exit and stop background work (a `cbar
+watch` Monitor). It never answers Claude's folder-trust question: if the restarted Claude asks to
+trust its folder, cbar says so and exits 1, and you answer it in its pane.
 
 ### The switchboard
 

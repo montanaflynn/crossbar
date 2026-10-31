@@ -1110,8 +1110,7 @@ pub fn main(args: Vec<String>) {
             let label = if g.label.is_empty() { g.session_id.chars().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect() } else { title(&g.label, &View::Exchange(exchange.clone())) };
             View::Scoped(g.session_id.clone(), label)
         }
-        // a 0.4 layout has no exchanges yet: show everything
-        None if has("--all") || home.old_layout() => View::All,
+        None if has("--all") => View::All,
         None => View::Exchange(exchange.clone()),
     };
     let exchanges: Vec<String> = home.exchanges().into_iter().map(|x| x.name).collect();

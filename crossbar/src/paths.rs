@@ -84,8 +84,7 @@ impl Node {
 }
 
 /// Where this process is: the project or exchange whose session it runs in,
-/// else the default exchange. A session with a 0.4 name (`stats` for a
-/// project of the default exchange) counts too, until it is renamed.
+/// else the default exchange.
 pub fn here(home: &Home) -> Node {
     here_from(home, mux::here_session().as_deref())
 }
@@ -99,8 +98,6 @@ pub fn here_from(home: &Home, session: Option<&str>) -> Node {
             }
         } else if home.exchange_exists(s) {
             return Node::Exchange(s.into());
-        } else if home.project_exists(&default, s) {
-            return Node::Project(default, s.into());
         }
     }
     Node::Exchange(default)
@@ -279,7 +276,7 @@ mod tests {
         let h = home("here");
         assert_eq!(here_from(&h, Some("central/stats")), Node::Project("central".into(), "stats".into()));
         assert_eq!(here_from(&h, Some("work")), Node::Exchange("work".into()));
-        assert_eq!(here_from(&h, Some("grail")), Node::Project("central".into(), "grail".into()));
+        assert_eq!(here_from(&h, Some("grail")), Node::Exchange("central".into())); // not a 0.4 session name
         assert_eq!(here_from(&h, Some("elsewhere")), Node::Exchange("central".into()));
         assert_eq!(here_from(&h, None), Node::Exchange("central".into()));
         let _ = std::fs::remove_dir_all(&h.root);

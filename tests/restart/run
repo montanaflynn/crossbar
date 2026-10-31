@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""Test `cbar restart` in a sandbox: a private tmux server, or a private Rex
+server, never the live one (the parity harness's sandbox, tests/parity/run).
+
+  tests/restart/run [--rex] [--keep] [--no-build] [-v] CHECKOUT
+
+The stub claude (tests/parity/stub/claude) records each start's argv and
+writes ~/.claude/sessions/PID.json under the scratch HOME, as Claude Code
+does. The cases: an idle operator, a done agent, the supervisor; a blocked
+and a working agent refused; a Claude whose session file is missing refused
+with nothing killed; a Claude that ignores /exit (SIGTERM); and an operator
+restarting its own pane from a tool it runs (its process group goes when it
+quits). Each restart must resume the old session id, pass the current role
+prompt, keep the pane's place and the board next to it, and type why.
+Prints one line per check; exits 1 if any fails.
+"""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+import shutil
+import signal
+import sys
+import tempfile
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+_loader = importlib.machinery.SourceFileLoader("parity", os.path.join(HERE, "..", "parity", "run"))
+_spec = importlib.util.spec_from_loader("parity", _loader)
+P = importlib.util.module_from_spec(_spec)
+_loader.exec_module(P)
+
+FAILS = []
+VERBOSE = False
+
+
+def check(name, ok, detail=""):
+    print(f"{'ok  ' if ok else 'FAIL'}  {name}" + (f"  ({detail})" if detail and (not ok or VERBOSE) else ""), flush=True)
+    if not ok:
+        FAILS.append(name)
+    return ok
+
+
+class World:
+    def __init__(self, side):
+        self.s = side
+        self.log = os.path.join(side.box.root, "argv")
+        self.sessions = os.path.join(side.box.home, ".claude", "sessions")
+
+    def starts(self, name):
+        """[(pid, argv)] of each start of the stub named NAME, oldest first."""
+        out = []
+        if not os.path.isdir(self.log):
+            return out
+        for f in os.listdir(self.log):
+            if f.rsplit(".", 1)[0] == name:
+                p = os.path.join(self.log, f)
+                out.append((os.path.getmtime(p), int(f.rsplit(".", 1)[1]), open(p).read().split("\0")[:-1]))
+        return [(pid, argv) for _, pid, argv in sorted(out)]
+
+    def session(self, pid):
+        try:
+            return json.load(open(os.path.join(self.sessions, f"{pid}.json")))
+        except (OSError, ValueError):
+            return None
+
+    def pane(self, session, tab):
+        return next((p for p in self.s.mux.panes() if p["session"] == session and p["tab"] == tab and p["label"] != "switchboard"), None)
+
+    def layout(self, session):
+        """(tab, label) of each pane of SESSION, sorted: what a restart must keep.
+        In Rex, with each pane's place in its tab and which pane has the focus;
+        in tmux, with its pane id (respawned in place)."""
+        if not self.s.rex:
+            return sorted((p["tab"], p["label"], p["pane"]) for p in self.s.mux.panes() if p["session"] == session)
+        sid = self.s.mux.session_id(session)
+        labels = {b["block_id"]: b.get("label", "") for b in self.s.mux.json("block", "ls", "-s", sid, "--json").get("blocks", [])}
+        out = []
+
+        def leaves(node, tab, focused):
+            if not isinstance(node, dict):
+                return
+            if "block_id" in node:
+                b = node["block_id"]
+                out.append((tab, labels.get(b, "?"), tuple(round(x, 3) for x in node.get("rect", [])), b == focused))
+            for k in ("split", "before", "after"):
+                leaves(node.get(k), tab, focused)
+
+        for w in self.s.mux.json("window", "ls", "-s", sid, "--json").get("windows", []):
+            for layer in w.get("layers", []):
+                leaves(layer.get("layout"), w.get("label", ""), w.get("focused_block_id"))
+        return sorted(out)
+
+    def cbar(self, *args, pane=None, timeout=180):
+        return self.s.run(["cbar", *args], pane=pane, timeout=timeout)
+
+    def tail(self, path):
+        return self.cbar("tail", path, "30")[1]
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def wait_for(fn, limit=60, step=0.5):
+    end = time.time() + limit
+    while time.time() < end:
+        v = fn()
+        if v:
+            return v
+        time.sleep(step)
+    return fn()
+
+
+def restarted(w, label, path, session, tab, name, prompt_mark=None, run=None, want_worktree_flag=None):
+    """Restart PATH (or RUN does) and check what came back in its place."""
+    before = w.starts(name)
+    if not check(f"{label}: has a start to restart", bool(before)):
+        return
+    old_pid, old_argv = before[-1]
+    old = w.session(old_pid) or {}
+    layout = w.layout(session)
+    if run:
+        code, out, err = run()
+    else:
+        code, out, err = w.cbar("restart", path)
+    check(f"{label}: cbar restart exits 0", code == 0, f"{code}: {out.strip()} {err.strip()}")
+    after = wait_for(lambda: len(w.starts(name)) > len(before) and w.starts(name), limit=90)
+    if not check(f"{label}: a new Claude started", bool(after), out + err):
+        return
+    new_pid, argv = after[-1]
+    check(f"{label}: the old Claude quit", not alive(old_pid), str(old_pid))
+    i = argv.index("--resume") if "--resume" in argv else -1
+    check(f"{label}: resumes session {old.get('sessionId')}", i >= 0 and argv[i + 1] == old.get("sessionId"), " ".join(argv)[:300])
+    new = wait_for(lambda: w.session(new_pid), limit=10) or {}
+    check(f"{label}: its session is the same", new.get("sessionId") == old.get("sessionId"), f"{new} vs {old}")
+    check(f"{label}: in the same folder", new.get("cwd") == old.get("cwd"), f"{new.get('cwd')} vs {old.get('cwd')}")
+    if prompt_mark:
+        j = argv.index("--append-system-prompt") if "--append-system-prompt" in argv else -1
+        check(f"{label}: with the current role prompt", j >= 0 and argv[j + 1].startswith(prompt_mark), argv[j + 1][:80] if j >= 0 else "none")
+    if want_worktree_flag is not None:
+        check(f"{label}: no -w (already in its worktree)", ("-w" in argv) == want_worktree_flag, " ".join(argv))
+    check(f"{label}: no brief prompt again", not any(a.startswith("Read ") for a in argv), " ".join(argv))
+    told = wait_for(lambda: "crossbar restarted you on" in w.tail(path), limit=60)
+    check(f"{label}: told why", told, w.tail(path)[-400:])
+    check(f"{label}: layout kept", w.layout(session) == layout, f"{w.layout(session)} vs {layout}")
+
+
+def refused(w, label, path, name, want):
+    before = w.starts(name)
+    pid = before[-1][0] if before else None
+    layout = w.layout(path.split("/")[0] + "/" + path.split("/")[1]) if path.count("/") else None
+    code, out, err = w.cbar("restart", path)
+    check(f"{label}: refused", code == 1 and want in err, f"{code}: {out.strip()} | {err.strip()}")
+    time.sleep(2)
+    check(f"{label}: nothing restarted", len(w.starts(name)) == len(before))
+    check(f"{label}: its Claude still runs", pid is not None and alive(pid), str(pid))
+    if layout is not None:
+        check(f"{label}: layout kept", w.layout(path.split("/")[0] + "/" + path.split("/")[1]) == layout)
+
+
+def cases(w):
+    s = w.s
+    E = P.EXCHANGE
+    alpha, beta = f"{E}/alpha", f"{E}/beta"
+    # today's role prompts, as an update would leave them
+    for role in ("operator", "supervisor"):
+        with open(os.path.join(s.cb, f"{role}.md"), "w") as f:
+            f.write(f"RESTART-TEST {role} prompt\n")
+
+    restarted(w, "idle operator", alpha, alpha, "operator", "alpha operator", prompt_mark="RESTART-TEST operator prompt")
+    restarted(w, "idle supervisor", E, E, "supervisor", f"{E} supervisor", prompt_mark="RESTART-TEST supervisor prompt")
+    restarted(w, "done agent", f"{alpha}/t-done", alpha, "t-done", "t-done", want_worktree_flag=False)
+    # once restarted, a Claude can be restarted again
+    restarted(w, "operator again", alpha, alpha, "operator", "alpha operator", prompt_mark="RESTART-TEST operator prompt")
+
+    refused(w, "blocked agent", f"{alpha}/t-ask", "t-ask", "is blocked")
+    refused(w, "working agent", f"{alpha}/t-busy", "t-busy", "is working")
+
+    # no session file: a clear error, nothing killed
+    chat = w.starts("t-chat")[-1][0]
+    os.rename(os.path.join(w.sessions, f"{chat}.json"), os.path.join(w.sessions, f"{chat}.json.hidden"))
+    refused(w, "missing session file", f"{alpha}/t-chat", "t-chat", "found no Claude session file")
+    os.rename(os.path.join(w.sessions, f"{chat}.json.hidden"), os.path.join(w.sessions, f"{chat}.json"))
+
+    # a Claude that doesn't quit on /exit gets SIGTERM
+    nogit = w.pane(beta, "t-nogit")
+    s.mux.send_line(nogit["sid"], nogit["pane"], "/deaf")
+    time.sleep(1)
+    restarted(w, "deaf agent (SIGTERM)", f"{beta}/t-nogit", beta, "t-nogit", "t-nogit", want_worktree_flag=False)
+
+    # an operator restarts its own pane from a tool it runs
+    op = w.pane(beta, "operator")
+    cbar = os.path.join(s.bin, "cbar")
+    holder = {}
+
+    def own():
+        s.mux.send_line(op["sid"], op["pane"], f"/sh {cbar} restart operator > {s.box.root}/own.out 2>&1")
+        holder["out"] = wait_for(lambda: os.path.exists(f"{s.box.root}/own.out") and open(f"{s.box.root}/own.out").read(), limit=30) or ""
+        return (0 if "restarting" in holder["out"] else 1), holder["out"], ""
+
+    restarted(w, "own pane", beta, beta, "operator", "beta operator", prompt_mark="RESTART-TEST operator prompt", run=own)
+    log = os.path.join(s.cb, "logs", "restart-central-beta-operator.log")
+    wait_for(lambda: os.path.exists(log) and "restarted central/beta/operator" in open(log).read(), limit=20)
+    text = open(log).read() if os.path.exists(log) else ""
+    check("own pane: the detached restart logged it", "restarted central/beta/operator" in text, text[-300:])
+
+
+def main():
+    global VERBOSE
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("checkout", nargs="?")
+    ap.add_argument("--rex", action="store_true")
+    ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--no-build", action="store_true")
+    ap.add_argument("-v", action="store_true")
+    ap.add_argument("-h", "--help", action="store_true")
+    a = ap.parse_args()
+    if a.help or not a.checkout:
+        print(__doc__.strip())
+        sys.exit(0 if a.help else 2)
+    VERBOSE = a.v
+
+    def stop(sig, _):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGHUP, stop)
+    root = os.path.realpath(tempfile.mkdtemp(prefix="cbrst-", dir="/tmp"))   # short: Rex sockets live here
+    C = P.CLEANUP
+    C.add("sandbox", lambda: None if a.keep else shutil.rmtree(root, ignore_errors=True))
+    C.add("leftover processes", lambda: P.reap(root))
+    try:
+        box = P.Sandbox(root, a.rex)
+        side = P.build_new(box, os.path.realpath(a.checkout), not a.no_build, a.rex)
+        side.env["CBAR_STUB_SESSIONS"] = "1"
+        side.env["CBAR_STUB_LOG"] = os.path.join(root, "argv")
+        P.say(f"restart: setting up ({'rex' if a.rex else 'tmux'})")
+        P.setup(side)
+        cases(World(side))
+        side.mux.stop()
+        n, ps, _ = P.leftovers(side)
+        check("nothing left running", n == 0, ps)
+    except KeyboardInterrupt:
+        P.say("restart: interrupted")
+        return 130
+    finally:
+        C.run()
+        if a.keep:
+            P.say(f"restart: kept the sandbox at {root}")
+    print(f"{len(FAILS)} failed ({'rex' if a.rex else 'tmux'})" if FAILS else f"all passed ({'rex' if a.rex else 'tmux'})")
+    return 1 if FAILS else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

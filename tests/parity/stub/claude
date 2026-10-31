@@ -2,7 +2,7 @@
 # Stand-in for Claude Code in the parity sandbox: it never starts a real Claude.
 #
 #   claude agents --json     prints [] (the switchboards ask this in tmux)
-#   claude -n NAME [-w WT] [--append-system-prompt P] [PROMPT]
+#   claude -n NAME [-w WT] [--append-system-prompt P] [--resume ID] [PROMPT]
 #
 # It reports its state as Claude does, with OSC 7501 (Rex reads it; in tmux,
 # claude-relay turns it into pane options). The state comes from the brief the
@@ -10,23 +10,47 @@
 # `stub: STATE [KIND] [| MESSAGE]`. Without one it is idle. Then each line typed
 # into it makes it work for $CBAR_STUB_WORK seconds (default 2) and finish
 # done with "did: LINE"; a typed `/state STATE [KIND] [| MESSAGE]` sets that state.
+#
+# For the cbar restart tests (tests/restart/run), off unless asked for:
+#   $CBAR_STUB_LOG       a folder: each start writes its argv there, NUL-separated,
+#                        as NAME.PID
+#   $CBAR_STUB_SESSIONS  set: it writes ~/.claude/sessions/PID.json as Claude Code
+#                        does (sessionId: the --resume ID, else a new one), and
+#                        removes it when it quits
+#   typed /exit          quits, and like a Claude takes the rest of its process
+#                        group with it (after a typed /deaf it ignores /exit)
+#   typed /sh CMD        works while sh -c CMD runs (a Claude running a tool), then done
 
 if [ "$1" = agents ]; then
   echo '[]'
   exit 0
 fi
 
-name= wt=- prompt=
+if [ -n "$CBAR_STUB_LOG" ]; then
+  mkdir -p "$CBAR_STUB_LOG"
+  printf '%s\0' "$@" > "$CBAR_STUB_LOG/.argv.$$"
+fi
+name= wt=- prompt= resume=
 while [ $# -gt 0 ]; do
   case $1 in
     -n) name=$2; shift ;;
     -w) wt=$2; shift ;;
     --append-system-prompt) shift ;;
+    --resume) resume=$2; shift ;;
     *) prompt=$1 ;;
   esac
   shift
 done
+[ -n "$CBAR_STUB_LOG" ] && mv "$CBAR_STUB_LOG/.argv.$$" "$CBAR_STUB_LOG/$name.$$"
 brief=$(printf '%s\n' "$prompt" | sed -n 's/^Read \(.*\) and do the task it describes\.$/\1/p')
+
+session_file=
+if [ -n "$CBAR_STUB_SESSIONS" ]; then
+  sid=${resume:-$(uuidgen | tr 'A-Z' 'a-z')}
+  mkdir -p "$HOME/.claude/sessions"
+  session_file="$HOME/.claude/sessions/$$.json"
+  printf '{"pid":%s,"sessionId":"%s","cwd":"%s","kind":"interactive","status":"idle"}\n' "$$" "$sid" "$PWD" > "$session_file"
+fi
 
 # emit SPEC: report "STATE [KIND] [| MESSAGE]"
 emit() {
@@ -40,19 +64,40 @@ emit() {
   printf '\033]7501;%s\033\\' "$out"
 }
 
+quit() {
+  [ -n "$session_file" ] && rm -f "$session_file"
+  exit 0
+}
+
 script=
 [ -n "$brief" ] && [ -f "$brief" ] && script=$(sed -n '1s/^stub: //p' "$brief")
 echo "stub claude: $name"
 echo "worktree: $wt"
 echo "brief: ${brief##*/}"
+[ -n "$resume" ] && echo "resumed: $resume"
 echo "state: ${script:-idle}"
 emit "${script:-idle}"
 
-trap 'exit 0' HUP TERM INT
+deaf=
+trap quit HUP TERM INT
 while IFS= read -r line; do
   echo "> $line"
   case $line in
     '/state '*) emit "${line#/state }" ;;
+    /exit)
+      if [ -z "$deaf" ]; then
+        [ -n "$session_file" ] && rm -f "$session_file"
+        trap '' TERM
+        kill -TERM 0 2>/dev/null
+        exit 0
+      fi
+      ;;
+    /deaf) deaf=1 ;;
+    '/sh '*)
+      emit working
+      sh -c "${line#/sh }"
+      emit "done | ran: ${line#/sh }"
+      ;;
     '') ;;
     *)
       emit working
@@ -61,3 +106,4 @@ while IFS= read -r line; do
       ;;
   esac
 done
+quit

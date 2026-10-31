@@ -911,17 +911,7 @@ The project's path carries the exchange (`central/beta`).
 
 ## tail-chat (rex)
 
-0.4 typed the agent's command line into a shell, so it shows up on the agent's screen; 0.5 starts it as the pane's own command (rust.md addendum: any shell).
-
-```diff
---- old
-+++ new
-@@ -1,4 +1,2 @@
--p/cbpar-mv1a63wl/home/.crossbar-old/projects/alpha/briefs/t-chat.md\ and\ do\ th
--e\ task\ it\ describes.
- stub claude: t-chat
- worktree: t-chat
-```
+Any diff. As tail-chat: 0.4 typed the agent's command line into a shell, so it shows up on the agent's screen; 0.5 starts it as the pane's own command (rust.md addendum: any shell). In Rex the typed line wraps at 80 columns, and where depends on the sandbox's path, so no one diff fits.
 
 ## version
 

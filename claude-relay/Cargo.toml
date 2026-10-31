@@ -7,9 +7,3 @@ license = "MIT"
 
 [dependencies]
 libc = "0.2"
-
-[profile.release]
-opt-level = 3
-lto = true
-strip = true
-panic = "abort"

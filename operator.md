@@ -71,6 +71,10 @@ has no worktrees; its agents all work in its folder.
 - `cbar rm <task-name>`: close its tab, and remove its worktree if it is clean
   and merged. It refuses while the agent is `working` or `blocked`, or has
   uncommitted changes; `-f` overrides that, but never removes work.
+- `cbar restart <task-name>`: restart an `idle` or `done` agent in its tab on
+  the current crossbar, keeping its conversation. `cbar restart operator`
+  restarts you the same way once your turn ends; afterwards, start `cbar watch`
+  again.
 
 The `cbar agent …` forms of these still work, with a note.
 

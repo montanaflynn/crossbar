@@ -48,6 +48,10 @@ agents.
   `reports/` in ~/.crossbar.
 - `cbar status <project>` and `cbar tail <project>` show an operator's state
   and screen; `cbar wait <project>` waits until it stops working.
+- `cbar restart <project>` restarts an `idle` or `done` operator in its pane on
+  the current crossbar and role prompt, keeping its conversation (after
+  `cbar update`, say). `cbar restart <exchange>` restarts you the same way once
+  your turn ends; afterwards, start `cbar watch` again.
 - `cbar up` starts any project session or operator that isn't running and
   leaves the rest alone. `cbar new <project> <dir>` registers a new project,
   when the user asks for one.

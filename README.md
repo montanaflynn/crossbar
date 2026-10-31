@@ -91,6 +91,9 @@ cbar send PATH TEXT                    type TEXT and Enter into its Claude, only
 cbar status PATH                       its Claude's state
 cbar tail PATH [N]                     the last N lines of its screen
 cbar wait PATH [SECONDS]               wait until it stops working
+cbar restart PATH                      quit its Claude (only if idle or done) and start it again
+                                       in its pane with today's role prompt, resuming its
+                                       conversation; your own pane: once your turn ends
 cbar rm [-y] [-f] PATH                 an agent: close its tab, and remove its worktree if clean
                                        and merged (refuses while it works, is blocked or has
                                        uncommitted changes, unless -f); a project or an exchange:
@@ -103,12 +106,20 @@ cbar board [EXCHANGE|PROJECT] [--all]  the switchboard (--once prints once, --js
 cbar update | version | help
 ```
 
-In `send`, `status`, `tail` and `wait`, a project's path means its operator and an exchange's
+In `send`, `status`, `tail`, `wait` and `restart`, a project's path means its operator and an exchange's
 its supervisor. `cbar watch` is meant for the Monitor tool: when it starts, it also prints what
 is already blocked or in error, and anything done that a previous watch hadn't reported.
 
 The panes cbar makes run `cbar run supervisor|operator|board|agent` as their own command, so
 nothing is typed into a shell. When that program exits, the pane drops to your login shell.
+
+`cbar restart PATH` moves a running Claude onto the current crossbar, e.g. after `cbar update`
+changed the role prompts. It finds the pane's Claude session id in
+`~/.claude/sessions/<pid>.json` (the Claude under the pane's process), types `/exit` (SIGTERM if
+that doesn't do it), starts `cbar run … --resume <id>` in the same pane (tmux respawns it; Rex puts
+a new pane in its place), and once it's up types a line telling it why. Restarting your own pane
+(`cbar restart operator` from the operator) hands off to a detached cbar that waits until your turn
+ends; its log is in `~/.crossbar/logs/`.
 
 The 0.4 forms still work and print a note: `cbar operator` and `cbar supervisor` (now
 `cbar run …`), `cbar board --here` (`cbar run board`), and

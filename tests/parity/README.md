@@ -40,6 +40,13 @@ their states, and run the cases in `run` (`cases()`): boards (`--once`, `--json`
 `ls`, `help`, the agent commands, errors and exit codes, `watch`, `rm`. The tmux server or Rex
 server, and anything else a run started, is stopped when it ends, however it ends.
 
+## cbar restart
+
+`tests/restart/run [--rex] CHECKOUT` uses this sandbox for the new side only and tests
+`cbar restart`: the stub records each start's argv (`$CBAR_STUB_LOG`) and writes
+`~/.claude/sessions/PID.json` under the scratch HOME (`$CBAR_STUB_SESSIONS`), as Claude Code does.
+Neither is set in a parity run.
+
 ## Intended differences
 
 `intended.md` lists every normalization and every difference that is meant to be there, with why.

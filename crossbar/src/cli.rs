@@ -508,10 +508,10 @@ fn cmd_up(home: &Home, args: Vec<String>) {
         }
     }
     let all = status::flatten(Looker::new(false).snapshot(None));
-    let legacy = e == home.default_exchange();
+    let legacy = e == home.default_exchange() && home.migrated().is_some();
 
     let dir = util::home().to_string_lossy().into_owned();
-    if legacy && !mux::session_running(&e, term) && all.iter().any(|f| f.group == "central") {
+    if legacy && !mux::session_running(&e, term) && all.iter().any(|f| f.group == "central" && f.mux == term.as_str()) {
         println!("{e}: running as 'central' (its 0.4 name; cbar migrate renames it)");
     } else {
         up_one(&all, &e, &dir, term, SUPERVISOR, &format!("/{e}"));
@@ -645,7 +645,7 @@ impl Tree<'_> {
     }
 
     fn exchange(&mut self, home: &Home, x: &layout::Exchange, only_project: Option<&str>) {
-        let legacy = x.name == home.default_exchange();
+        let legacy = x.name == home.default_exchange() && home.migrated().is_some();
         let has = |g: &str, t: Term| self.all.iter().any(|f| f.group == g && f.mux == t.as_str());
         let term = x.terminal.unwrap_or_else(|| if has(&x.name, Term::Tmux) { Term::Tmux } else { Term::Rex });
         let projects: Vec<_> = home.projects(&x.name).into_iter().filter(|p| only_project.is_none_or(|o| o == p.name)).collect();

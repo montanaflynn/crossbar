@@ -202,7 +202,7 @@ impl Looker {
         let records = status["records"].as_array().cloned().unwrap_or_default();
         let root = records
             .iter()
-            .find(|r| r["id"].as_str().map_or(true, |s| s.is_empty()))
+            .find(|r| r["id"].as_str().is_none_or(|s| s.is_empty()))
             .or(records.first())
             .cloned()
             .unwrap_or(Value::Null);

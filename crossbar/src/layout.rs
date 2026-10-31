@@ -150,8 +150,22 @@ impl Home {
     }
 
     pub fn set_default_exchange(&self, ex: &str) -> std::io::Result<()> {
+        self.write_config(ex, toml_get(&self.config(), "migrated").as_deref())
+    }
+
+    /// When `cbar migrate` converted a 0.4 layout here, if it did: until its
+    /// sessions are renamed, their 0.4 names (`central`, `stats`) still count.
+    pub fn migrated(&self) -> Option<String> {
+        toml_get(&self.config(), "migrated")
+    }
+
+    pub fn write_config(&self, ex: &str, migrated: Option<&str>) -> std::io::Result<()> {
         fs::create_dir_all(&self.root)?;
-        write_file(&self.config(), &format!("default_exchange = {}\n", toml_str(ex)))
+        let mut text = format!("default_exchange = {}\n", toml_str(ex));
+        if let Some(m) = migrated {
+            text.push_str(&format!("migrated = {}\n", toml_str(m)));
+        }
+        write_file(&self.config(), &text)
     }
 
     pub fn exchange_exists(&self, ex: &str) -> bool {

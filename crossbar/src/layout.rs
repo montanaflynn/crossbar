@@ -74,6 +74,7 @@ pub fn toml_get(file: &Path, key: &str) -> Option<String> {
     let table: toml::Table = text.parse().ok()?;
     match table.get(key)? {
         toml::Value::String(s) => Some(s.clone()),
+        toml::Value::Datetime(d) => Some(d.to_string()),
         v => Some(v.to_string()),
     }
 }
@@ -136,6 +137,10 @@ impl Home {
 
     /// Stop with a pointer to `cbar migrate` if this home has the old layout.
     pub fn require_migrated(&self) {
+        let left = self.root.join("projects");
+        if !self.needs_migrate() && fs::symlink_metadata(&left).is_ok_and(|m| m.is_dir()) {
+            util::warn(format!("{} is a 0.4 folder again; `cbar migrate` moves what's in it", util::short(&left)));
+        }
         if self.needs_migrate() {
             util::die(format!(
                 "{} has the 0.4 layout (central/, projects/); run `cbar migrate` to move it into exchanges/{}",
@@ -278,6 +283,9 @@ mod tests {
         let created = toml_get(&h.project_toml("main", "stats"), "created").unwrap();
         h.register_project("main", "stats", Path::new("/tmp/c"), Term::Tmux).unwrap();
         assert_eq!(toml_get(&h.project_toml("main", "stats"), "created").unwrap(), created);
+        assert!(crate::util::parse_iso(&created).is_some(), "{created}");
+        let text = fs::read_to_string(h.project_toml("main", "stats")).unwrap();
+        assert!(text.parse::<toml::Table>().unwrap()["created"].is_datetime(), "{text}");
         let p = h.project("main", "stats").unwrap();
         assert_eq!((p.path.as_str(), p.terminal, p.session()), ("/tmp/c", Term::Tmux, "main/stats".to_string()));
         assert_eq!(h.exchanges().len(), 1);

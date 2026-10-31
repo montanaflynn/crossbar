@@ -66,6 +66,14 @@ const ERROR: Color = Color::Rgb(0xff, 0x7e, 0xb6);
 const DONE: Color = Color::Rgb(0x25, 0xbe, 0x6a);
 const WORKING: Color = Color::Rgb(0x78, 0xa9, 0xff);
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+/// How long each spinner frame shows.
+const SPIN_STEP: Duration = Duration::from_millis(120);
+
+/// The spinner frame for time SINCE the board started: by the clock, not by
+/// redraws, so bursts of input or resizes don't make it spin faster.
+pub fn spin_tick(since: Duration) -> usize {
+    (since.as_millis() / SPIN_STEP.as_millis()) as usize
+}
 
 fn color(state: &str) -> Option<Color> {
     match state {
@@ -957,9 +965,10 @@ fn live(mut board: Board) {
         Err(e) => util::die(format!("no terminal: {e}")),
     };
     let _ = term.hide_cursor();
-    let mut tick = 0usize;
+    let started = Instant::now();
     let mut loaded = false;
     while !QUIT.load(Ordering::Relaxed) {
+        let tick = spin_tick(started.elapsed());
         let (w, h) = terminal_size();
         board.cols = (w as usize).saturating_sub(2);
         let rows = (h as usize).saturating_sub(1).max(1);
@@ -970,7 +979,7 @@ fn live(mut board: Board) {
             }
             (sh.data.clone(), sh.status.as_ref().map(|(c, m, _)| (*c, m.clone())))
         };
-        loaded = loaded || !data.is_empty() || tick > 40;
+        loaded = loaded || !data.is_empty() || started.elapsed() > Duration::from_secs(5);
         let shown = pick(&data, &board.view, &board.exchanges);
         let link = board.exchange.clone();
         let frame = if loaded || !shown.is_empty() {
@@ -1009,7 +1018,6 @@ fn live(mut board: Board) {
             let foot_area = Rect { x: area.x + 1, y: area.y + area.height.saturating_sub(1), width: area.width.saturating_sub(1), height: 1 };
             f.render_widget(Paragraph::new(foot), foot_area);
         });
-        tick += 1;
         if !tty {
             std::thread::sleep(Duration::from_millis(120));
             continue;
@@ -1186,6 +1194,15 @@ mod tests {
 
     fn g(label: &str) -> (Group, Vec<Pane>) {
         (Group { session_id: label.into(), label: label.into(), mux: "rex".into(), window_id: None }, Vec::new())
+    }
+
+    #[test]
+    fn spinner_follows_the_clock() {
+        let ms = |n| spin_tick(Duration::from_millis(n));
+        assert_eq!((ms(0), ms(119), ms(120), ms(1199), ms(1200)), (0, 0, 1, 9, 10));
+        // however often it redraws in between: 50 redraws within one step show one frame
+        let frames: std::collections::HashSet<usize> = (0..50).map(|i| ms(240 + i * 2)).collect();
+        assert_eq!(frames.len(), 1);
     }
 
     #[test]

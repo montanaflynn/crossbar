@@ -183,6 +183,7 @@ class Side:
             "CROSSBAR_CLAUDE": os.path.join(self.stub, "claude"),
             "CLAUDE_RELAY_PROGRAM": os.path.join(self.stub, "claude"),
             "CBAR_STUB_WORK": "2",
+            "PS1": "$ ",   # a shell's prompt, if old cbar types into one, without the host name
         }
         self.mux = Rex(self) if rex else Tmux(self)
         self.panes_at = {}   # project or "central": (session id, its operator's/supervisor's pane)

@@ -3,7 +3,9 @@
 //!   config.toml                     default_exchange = "central"
 //!   operator.md, supervisor.md      role prompts, version, bin/
 //!   exchanges/<exchange>/
-//!     exchange.toml                 name, terminal, created
+//!     exchange.toml                 name, terminal, created, path (optional: the
+//!                                   folder its supervisor and agents start in;
+//!                                   without it, this exchange's own folder)
 //!     briefs/ reports/              the supervisor's agents
 //!     projects/<project>/
 //!       project.toml                name, path, terminal, created
@@ -47,6 +49,8 @@ impl Project {
 pub struct Exchange {
     pub name: String,
     pub terminal: Option<Term>,
+    /// `path` in exchange.toml, as written (it may start with `~`).
+    pub path: Option<String>,
 }
 
 /// The session for an exchange, or one of its projects.
@@ -76,6 +80,15 @@ pub fn toml_get(file: &Path, key: &str) -> Option<String> {
         toml::Value::String(s) => Some(s.clone()),
         toml::Value::Datetime(d) => Some(d.to_string()),
         v => Some(v.to_string()),
+    }
+}
+
+/// PATH with a leading `~` (or `~/`) as the home folder.
+pub fn expand_home(path: &str) -> PathBuf {
+    match path.strip_prefix('~') {
+        Some("") => util::home(),
+        Some(rest) if rest.starts_with('/') => util::home().join(rest.trim_start_matches('/')),
+        _ => PathBuf::from(path),
     }
 }
 
@@ -189,7 +202,21 @@ impl Home {
         if !f.is_file() {
             return None;
         }
-        Some(Exchange { name: ex.to_string(), terminal: toml_get(&f, "terminal").and_then(|t| Term::parse(&t)) })
+        Some(Exchange {
+            name: ex.to_string(),
+            terminal: toml_get(&f, "terminal").and_then(|t| Term::parse(&t)),
+            path: toml_get(&f, "path").filter(|p| !p.trim().is_empty()),
+        })
+    }
+
+    /// The folder exchange EX's supervisor and agents start in: `path` in its
+    /// exchange.toml, else the exchange's own folder (never ~, which Claude
+    /// Code asks to trust each time it starts there).
+    pub fn exchange_work_dir(&self, ex: &str) -> PathBuf {
+        match self.exchange(ex).and_then(|x| x.path) {
+            Some(p) => expand_home(&p),
+            None => self.exchange_dir(ex),
+        }
     }
 
     /// The projects of exchange EX in name order.
@@ -234,15 +261,17 @@ impl Home {
     }
 
     /// Write exchanges/EX/exchange.toml the same way, with briefs/, reports/
-    /// and projects/.
-    pub fn register_exchange(&self, ex: &str, term: Term) -> std::io::Result<()> {
+    /// and projects/. It keeps the `path` already there unless PATH is given.
+    pub fn register_exchange(&self, ex: &str, term: Term, path: Option<&Path>) -> std::io::Result<()> {
         let home = self.exchange_dir(ex);
         for d in ["briefs", "reports", "projects"] {
             fs::create_dir_all(home.join(d))?;
         }
         let f = home.join("exchange.toml");
         let created = toml_get(&f, "created").unwrap_or_else(util::local_iso_now);
-        write_file(&f, &format!("name = {}\nterminal = {}\ncreated = {created}\n", toml_str(ex), toml_str(term.as_str())))
+        let path = path.map(|p| p.to_string_lossy().into_owned()).or_else(|| toml_get(&f, "path"));
+        let path = path.map(|p| format!("path = {}\n", toml_str(&p))).unwrap_or_default();
+        write_file(&f, &format!("name = {}\nterminal = {}\n{path}created = {created}\n", toml_str(ex), toml_str(term.as_str())))
     }
 
     /// The role prompt NAME.md: the installed copy, else the one built in.
@@ -270,7 +299,7 @@ mod tests {
     #[test]
     fn registers_and_reads_back() {
         let h = sandbox("reg");
-        h.register_exchange("central", Term::Tmux).unwrap();
+        h.register_exchange("central", Term::Tmux, None).unwrap();
         h.register_project("central", "stats", Path::new("/tmp/a \"b\""), Term::Rex).unwrap();
         let created = toml_get(&h.project_toml("central", "stats"), "created").unwrap();
         h.register_project("central", "stats", Path::new("/tmp/c"), Term::Tmux).unwrap();
@@ -282,6 +311,30 @@ mod tests {
         assert_eq!((p.path.as_str(), p.terminal, p.session()), ("/tmp/c", Term::Tmux, "central/stats".to_string()));
         assert_eq!(h.exchanges().len(), 1);
         assert!(!h.old_layout());
+        let _ = fs::remove_dir_all(&h.root);
+    }
+
+    #[test]
+    fn an_exchange_starts_in_its_path() {
+        let h = sandbox("expath");
+        h.register_exchange("central", Term::Rex, None).unwrap();
+        // no path: the exchange's own folder, not ~
+        assert_eq!(h.exchange_work_dir("central"), h.exchange_dir("central"));
+        assert_eq!(h.exchange("central").unwrap().path, None);
+        // a path written by hand, with ~, survives cbar rewriting the file
+        let f = h.exchange_toml("central");
+        let text = fs::read_to_string(&f).unwrap();
+        fs::write(&f, format!("{text}path = \"~/central\"\n")).unwrap();
+        h.register_exchange("central", Term::Tmux, None).unwrap();
+        assert_eq!(h.exchange("central").unwrap().path.as_deref(), Some("~/central"));
+        assert_eq!(h.exchange_work_dir("central"), util::home().join("central"));
+        assert_eq!(h.exchange("central").unwrap().terminal, Some(Term::Tmux));
+        // one given replaces it
+        h.register_exchange("central", Term::Tmux, Some(Path::new("/srv/x"))).unwrap();
+        assert_eq!(h.exchange_work_dir("central"), PathBuf::from("/srv/x"));
+        assert!(fs::read_to_string(&f).unwrap().parse::<toml::Table>().is_ok());
+        assert_eq!(expand_home("~"), util::home());
+        assert_eq!(expand_home("~x/y"), PathBuf::from("~x/y"));
         let _ = fs::remove_dir_all(&h.root);
     }
 

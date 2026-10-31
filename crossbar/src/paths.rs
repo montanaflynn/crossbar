@@ -227,7 +227,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let h = Home { root };
         for e in ["central", "work"] {
-            h.register_exchange(e, Term::Tmux).unwrap();
+            h.register_exchange(e, Term::Tmux, None).unwrap();
         }
         h.register_project("central", "stats", Path::new("/tmp"), Term::Tmux).unwrap();
         h.register_project("central", "grail", Path::new("/tmp"), Term::Tmux).unwrap();

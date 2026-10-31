@@ -33,7 +33,9 @@ exchange), `stats` is its project. `/central/stats` is absolute, `..` goes up.
       [--no-worktree]                <project>/briefs/AGENT.md (BRIEF is copied there); in its
                                      own git worktree when the project is a git repo
   new --agent AGENT [BRIEF]          the same in the exchange's own session (the supervisor's)
-  new --exchange NAME [--tmux|--rex] create an exchange and start its supervisor and main board
+  new --exchange NAME [DIR]          create an exchange and start its supervisor and main board
+      [--tmux|--rex]                 in DIR (`path` in its exchange.toml; default: its own
+                                     folder under ~/.crossbar/exchanges/), where its agents start
   up [EXCHANGE] [--tmux|--rex]       start the exchange's supervisor and main switchboard and
                                      every project's session and operator that isn't running;
                                      leaves whatever runs alone
@@ -235,12 +237,12 @@ fn cmd_new(home: &Home, args: Vec<String>) {
     let Some(path) = a.pos.first() else { die(format!("usage: {usage}")) };
     home.require_layout();
     if a.has("--exchange") {
-        return new_exchange(home, path.trim_matches('/'), a.term());
+        return new_exchange(home, path.trim_matches('/'), a.pos.get(1).map(String::as_str), a.term());
     }
     // a first project on a fresh install: the default exchange comes with it
     if home.exchanges().is_empty() && !path.starts_with('/') {
         let e = home.default_exchange();
-        home.register_exchange(&e, a.term().unwrap_or_else(default_terminal))
+        home.register_exchange(&e, a.term().unwrap_or_else(default_terminal), None)
             .unwrap_or_else(|err| die(format!("could not register exchange '{e}': {err}")));
         if !home.config().exists() {
             let _ = home.set_default_exchange(&e);
@@ -251,19 +253,23 @@ fn cmd_new(home: &Home, args: Vec<String>) {
     let extra = a.pos.get(1).map(String::as_str);
     match &node {
         Node::Root => die(format!("usage: {usage}")),
-        Node::Exchange(e) => new_exchange(home, e, a.term()),
+        Node::Exchange(e) => new_exchange(home, e, extra, a.term()),
         Node::Project(e, p) => new_project(home, e, p, extra, a.term()),
         Node::Agent { exchange, project, name } => new_agent(home, exchange, project.as_deref(), name, extra, !a.has("--no-worktree"), !path.contains('/') && project.is_some()),
     }
 }
 
-fn new_exchange(home: &Home, e: &str, term: Option<Term>) {
+fn new_exchange(home: &Home, e: &str, dir: Option<&str>, term: Option<Term>) {
     if !layout::valid_name(e) {
         die("an exchange name is letters, digits, '_' and '-'");
     }
+    let dir = dir.map(|d| {
+        let d = layout::expand_home(d);
+        d.canonicalize().ok().filter(|c| c.is_dir()).unwrap_or_else(|| die(format!("no folder {}", d.display())))
+    });
     let term = term.or_else(|| home.exchange(e).and_then(|x| x.terminal)).unwrap_or_else(default_terminal);
     let fresh = !home.exchange_exists(e);
-    home.register_exchange(e, term).unwrap_or_else(|err| die(format!("could not register '{e}': {err}")));
+    home.register_exchange(e, term, dir.as_deref()).unwrap_or_else(|err| die(format!("could not register '{e}': {err}")));
     if !home.config().exists() {
         let _ = home.set_default_exchange(e);
     }
@@ -274,21 +280,31 @@ fn new_exchange(home: &Home, e: &str, term: Option<Term>) {
         println!("session '{e}' already exists; registered it");
         return;
     }
-    if let Err(err) = start_exchange(e, term) {
+    let dir = exchange_dir(home, e).unwrap_or_else(|err| die(err));
+    if let Err(err) = start_exchange(e, &dir, term) {
         die(err);
     }
 }
 
-/// Session E: tab supervisor running `cbar run supervisor`, and the main
-/// switchboard at 30% to its right.
-fn start_exchange(e: &str, term: Term) -> Result<(), String> {
-    let dir = util::home().to_string_lossy().into_owned();
+/// The folder exchange E's supervisor and agents start in (`path` in its
+/// exchange.toml, else its own folder), or why there's none.
+fn exchange_dir(home: &Home, e: &str) -> Result<String, String> {
+    let dir = home.exchange_work_dir(e);
+    if !dir.is_dir() {
+        return Err(format!("exchange '{e}': no folder {} (its path in {})", short(&dir), short(home.exchange_toml(e))));
+    }
+    Ok(dir.to_string_lossy().into_owned())
+}
+
+/// Session E in DIR: tab supervisor running `cbar run supervisor`, and the
+/// main switchboard at 30% to its right.
+fn start_exchange(e: &str, dir: &str, term: Term) -> Result<(), String> {
     let root = format!("/{e}");
-    let made = mux::new_session(term, e, &dir, SUPERVISOR, &pane_argv(&["supervisor", &root]))?;
-    if let Err(err) = mux::split(term, e, &made.pane, &dir, 30, false, "switchboard", &pane_argv(&["board", &root])) {
+    let made = mux::new_session(term, e, dir, SUPERVISOR, &pane_argv(&["supervisor", &root]))?;
+    if let Err(err) = mux::split(term, e, &made.pane, dir, 30, false, "switchboard", &pane_argv(&["board", &root])) {
         util::warn(format!("could not add the switchboard pane: {err}"));
     }
-    println!("created session '{e}' in ~ with a supervisor and the main switchboard{}", if term == Term::Tmux { " (tmux)" } else { "" });
+    println!("created session '{e}' in {} with a supervisor and the main switchboard{}", short(dir), if term == Term::Tmux { " (tmux)" } else { "" });
     Ok(())
 }
 
@@ -346,7 +362,7 @@ fn start_project(session: &str, dir: &str, term: Term) -> Result<(), String> {
 fn work_dir(home: &Home, e: &str, p: Option<&str>) -> Option<String> {
     match p {
         Some(p) => home.project(e, p).map(|x| x.path),
-        None => Some(util::home().to_string_lossy().into_owned()),
+        None => Some(home.exchange_work_dir(e).to_string_lossy().into_owned()),
     }
 }
 
@@ -383,7 +399,10 @@ fn new_agent(home: &Home, e: &str, p: Option<&str>, name: &str, brief_from: Opti
     if t.find().is_some() {
         die(format!("session '{}' already has a tab '{name}'", t.session));
     }
-    let dir = work_dir(home, e, p).filter(|d| Path::new(d).is_dir()).unwrap_or_else(|| die("its project folder is gone"));
+    let dir = match p {
+        Some(_) => work_dir(home, e, p).filter(|d| Path::new(d).is_dir()).unwrap_or_else(|| die("its project folder is gone")),
+        None => exchange_dir(home, e).unwrap_or_else(|err| die(err)),
+    };
     let mut note = String::new();
     if worktree && !is_git_repo(&dir) {
         worktree = false;
@@ -531,7 +550,7 @@ fn cmd_up(home: &Home, args: Vec<String>) {
     }
     let term = a.term().or_else(|| home.exchange(&e).and_then(|x| x.terminal)).unwrap_or_else(default_terminal);
     let fresh = !home.exchange_exists(&e);
-    home.register_exchange(&e, term).unwrap_or_else(|err| die(format!("could not register '{e}': {err}")));
+    home.register_exchange(&e, term, None).unwrap_or_else(|err| die(format!("could not register '{e}': {err}")));
     if fresh {
         println!("created exchange '{e}' in {}", short(home.exchange_dir(&e)));
         if !home.config().exists() {
@@ -541,8 +560,10 @@ fn cmd_up(home: &Home, args: Vec<String>) {
     let all = status::flatten(Looker::new(false).snapshot(None));
     let legacy = e == home.default_exchange();
 
-    let dir = util::home().to_string_lossy().into_owned();
-    up_one(&all, &e, &dir, term, SUPERVISOR, &format!("/{e}"));
+    match exchange_dir(home, &e) {
+        Ok(dir) => up_one(&all, &e, &dir, term, SUPERVISOR, &format!("/{e}")),
+        Err(err) => util::warn(format!("{err}; skipped its supervisor")),
+    }
     for p in home.projects(&e) {
         if !Path::new(&p.path).is_dir() {
             util::warn(format!("{}: no folder {}; skipped it", p.name, short(&p.path)));
@@ -561,7 +582,7 @@ fn cmd_up(home: &Home, args: Vec<String>) {
 /// ROLE when that tab is missing or only has a shell. ALL holds the panes.
 fn up_one(all: &[Flat], name: &str, dir: &str, term: Term, role: &str, path: &str) {
     if !mux::session_running(name, term) {
-        let made = if role == SUPERVISOR { start_exchange(name, term) } else { start_project(name, dir, term) };
+        let made = if role == SUPERVISOR { start_exchange(name, dir, term) } else { start_project(name, dir, term) };
         if let Err(err) = made {
             util::warn(format!("{name}: {err}"));
         }
@@ -685,7 +706,7 @@ impl Tree<'_> {
             return;
         }
         let (s, c) = self.state(&x.name, term, SUPERVISOR, None);
-        self.row("", &x.name, term.as_str(), "~", &s, &c);
+        self.row("", &x.name, term.as_str(), &short(home.exchange_work_dir(&x.name)), &s, &c);
         let agents = self.agents(&x.name, term, SUPERVISOR);
         let n = projects.len() + agents.len();
         let mut i = 0;

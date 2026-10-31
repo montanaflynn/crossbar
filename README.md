@@ -80,7 +80,8 @@ cbar new PROJECT/AGENT [BRIEF]         start Claude in a new tab of the project 
          [--no-worktree]               <project>/briefs/AGENT.md (BRIEF is copied there); in its
                                        own git worktree when the project is a git repo
 cbar new --agent AGENT [BRIEF]         the same in the exchange's own session
-cbar new --exchange NAME               create an exchange and start its supervisor and main board
+cbar new --exchange NAME [DIR]         create an exchange and start its supervisor and main board
+                                       in DIR (see below)
 cbar up [EXCHANGE] [--tmux|--rex]      start the supervisor, the main switchboard and every
                                        project's session and operator that isn't running; leaves
                                        whatever runs alone
@@ -171,7 +172,7 @@ cbar open myproject          # attaches; inside tmux, switches to it
 ├── config.toml                  default_exchange = "central"
 ├── version
 └── exchanges/<exchange>/
-    ├── exchange.toml            name, terminal, created
+    ├── exchange.toml            name, terminal, created, path
     ├── briefs/ reports/         the supervisor's agents
     └── projects/<project>/
         ├── project.toml         name, path, terminal, created
@@ -182,6 +183,12 @@ An agent's brief is `briefs/<agent>.md` in its project's (or exchange's) folder,
 its results to `reports/<agent>.md` next to it. The supervisor's session is named after the
 exchange (`central`), and a project's is `<exchange>/<project>` (`central/stats`), so two
 exchanges can each have a `stats`.
+
+An exchange's supervisor and its own agents start in the folder `path` in its `exchange.toml`
+(`cbar new --exchange NAME DIR` sets it; `~/` works), else in the exchange's folder under
+`~/.crossbar/exchanges/`. Not in `~`: Claude Code asks to trust the folder it starts in, and never
+remembers that for the home folder. An exchange whose supervisor started in `~` before 0.5.2 keeps
+it there until it is started again; `cbar restart` resumes it where its conversation is.
 
 ## Develop
 

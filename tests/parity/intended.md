@@ -11,10 +11,13 @@ Applied to both sides' output before comparing; the summary says which strip rul
 
 - Paths: each side's CROSSBAR_HOME is `~/.crossbar`, the scratch HOME is `~`, the sandbox `$SANDBOX`,
   the side's bin folder `$BIN`, its stub folder `$STUB`, its tmux socket name `$SOCK`.
-- Ids: tmux `%12` `@3` `$1` become `%N` `@N` `$N`; Rex `session:<uuid>` (and window, block, client)
-  become `session:ID`.
-- Times: the board clock `HH:MM`; in `--json`, a non-empty `since` is `<age>`. Ages in text (`now`,
-  `2m`) are left as they are: every side captures within its first minute.
+- Ids, the same for both terminals: tmux `%12` and Rex `block:<uuid>` become `<pane>`, tmux `@3`
+  and Rex `window:<uuid>` `<window>`, tmux `$1` and Rex `session:<uuid>` `<session>` (Rex `client:`
+  and `layer:` ids likewise). A case whose Rex diff can't match its tmux one has a `## CASE (rex)`
+  entry of its own, used only with `--rex`.
+- Times: the board clock `HH:MM`; in `--json`, a non-empty `since` is `<age>`; at the end of a line
+  after a state (`cbar ls`'s `done 1m`), `<age>`. Other ages in text (board rows, `cbar agent ls`)
+  are left as they are: those cases run within each side's first minute.
 - Escape sequences: removed, except in `-color` cases, where each run of text is shown with its
   style (`[fg=#be95ff b]…[/]`), however the SGR codes were written.
 - `--json`: groups sorted by label, panes by tab and label, keys sorted.
@@ -34,8 +37,8 @@ A project that isn't a git repo gets no worktree (`-w`), and cbar says so (centr
 --- old
 +++ new
 @@ -1,2 +1,2 @@
--started t-nogit in a new tab (%N)
-+started t-nogit in a new tab (%N) (no worktree: ~/repo-b isn't a git repo)
+-started t-nogit in a new tab (<pane>)
++started t-nogit in a new tab (<pane>) (no worktree: ~/repo-b isn't a git repo)
  --- exit 0
 ```
 
@@ -217,13 +220,13 @@ Any diff. `cbar agent` is a deprecated alias; its help maps each form to the pat
 +NAME           TERMINAL  PATH      SESSION  CLAUDE
 +central        tmux      ~         running  supervisor idle
 +├─ alpha       tmux      ~/repo-a  running  operator idle
-+│  ├─ t-done                                done now
-+│  ├─ t-ask                                 blocked now
-+│  ├─ t-boom                                error now
-+│  ├─ t-busy                                working now
-+│  └─ t-chat                                idle now
++│  ├─ t-done                                done <age>
++│  ├─ t-ask                                 blocked <age>
++│  ├─ t-boom                                error <age>
++│  ├─ t-busy                                working <age>
++│  └─ t-chat                                idle <age>
 +└─ beta        tmux      ~/repo-b  running  operator idle
-+   └─ t-nogit                               done now
++   └─ t-nogit                               done <age>
  --- exit 0
 ```
 
@@ -240,10 +243,10 @@ The same tree as ls, after t-done and t-boom were closed and beta removed.
 +NAME          TERMINAL  PATH      SESSION  CLAUDE
 +central       tmux      ~         running  supervisor idle
 +└─ alpha      tmux      ~/repo-a  running  operator idle
-+   ├─ t-ask                                blocked 1m
-+   ├─ t-busy                               working 1m
-+   ├─ t-chat                               done now
-+   └─ t-path                               idle now
++   ├─ t-ask                                blocked <age>
++   ├─ t-busy                               working <age>
++   ├─ t-chat                               done <age>
++   └─ t-path                               idle <age>
  --- exit 0
 ```
 

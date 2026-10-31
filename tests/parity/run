@@ -342,6 +342,12 @@ class Rex:
                 self.server.wait(10)
             except subprocess.TimeoutExpired:
                 os.killpg(self.server.pid, signal.SIGKILL)
+        # and anything else still serving its socket
+        for pid in sh(["pgrep", "-f", self.side.rex_sock]).stdout.split():
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+            except (ValueError, OSError):
+                pass
 
     def session_id(self, name):
         for s in self.json("ls", "--json").get("sessions", []):
@@ -733,10 +739,14 @@ def common(side, text):
     text = text.replace(box.short(side.cb), "~/.crossbar")
     text = text.replace(side.sock, "$SOCK")
     text = re.sub(r"\b\d\d:\d\d\b", "HH:MM", text)
-    text = re.sub(r"(?<![\w.])%\d+\b", "%N", text)
-    text = re.sub(r"(?<![\w.])@\d+\b", "@N", text)
-    text = re.sub(r"(?<![\w.])\$\d+\b", "$N", text)
-    text = re.sub(r"\b(session|window|block|client):[0-9a-f-]{36}\b", r"\1:ID", text)
+    # `cbar ls` puts an agent's age after its state; later cases run past a minute
+    text = re.sub(r"\b(idle|working|done|blocked|error) (now|\d+[smhd])$", r"\1 <age>", text, flags=re.M)
+    # the same tokens for tmux and Rex ids, so one accepted diff fits both
+    text = re.sub(r"(?<![\w.])%\d+\b", "<pane>", text)
+    text = re.sub(r"(?<![\w.])@\d+\b", "<window>", text)
+    text = re.sub(r"(?<![\w.])\$\d+\b", "<session>", text)
+    text = re.sub(r"\bblock:[0-9a-f-]{36}\b", "<pane>", text)
+    text = re.sub(r"\b(session|window|client|layer):[0-9a-f-]{36}\b", r"<\1>", text)
     return names(side, text)
 
 
@@ -929,7 +939,8 @@ def run(a, checkout, root):
         diff = "".join(difflib.unified_diff(o.splitlines(True), n.splitlines(True), "old", "new", n=2))
         if diff:
             open(os.path.join(d, "diff"), "w").write(diff)
-        e = intended.get(c.name)
+        key = f"{c.name} (rex)" if a.rex and f"{c.name} (rex)" in intended else c.name
+        e = intended.get(key)
         if not diff:
             status = "pass"
         elif e and (e["diff"] is None or e["diff"] == diff):
@@ -939,7 +950,11 @@ def run(a, checkout, root):
         else:
             status = "DIFF"
         if diff and ("all" in a.accept or c.name in a.accept):
-            accept[c.name] = diff
+            # in Rex, a diff that isn't the tmux one gets an entry of its own
+            key = f"{c.name} (rex)" if a.rex and (key.endswith("(rex)") or c.name in intended) else c.name
+            accept[key] = diff
+            if key not in intended and c.name in intended:
+                intended[key] = dict(intended[c.name])
             status = "accepted"
         rows.append((c.name, status, diff, e))
 
@@ -959,7 +974,8 @@ def run(a, checkout, root):
             print("".join("    " + l for l in diff.splitlines(True)))
     for rule, names_ in fired_all.items():
         print(f"normalized: {rule} ({len(names_)} cases)")
-    stale = sorted(set(intended) - {r[0] for r in rows}) if not a.only else []
+    ran = {r[0] for r in rows}
+    stale = sorted(k for k in intended if k.removesuffix(" (rex)") not in ran) if not a.only else []
     for name in stale:
         print(f"stale     {name}  (in intended.md, but no such case ran)")
     print(" · ".join(f"{v} {k}" for k, v in sorted(counts.items())) + f"   ({'rex' if a.rex else 'tmux'})")

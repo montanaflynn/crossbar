@@ -94,7 +94,47 @@ pub fn find(root: i64) -> Option<Session> {
 pub fn keep_worktree_prompt(screen: &str) -> bool {
     let lines: Vec<&str> = screen.lines().collect();
     let Some(at) = lines.iter().rposition(|l| l.contains("Exiting worktree session")) else { return false };
-    lines[at..].iter().any(|l| l.trim_start().strip_prefix('❯').is_some_and(|rest| rest.trim_start().trim_start_matches("1.").trim_start().starts_with("Keep worktree")))
+    lines[at..].iter().any(|l| chosen(l, "1.", "Keep worktree"))
+}
+
+/// Whether SCREEN shows Claude Code's question on /exit while background
+/// work runs (a `cbar watch` Monitor, a background shell), with "Exit and
+/// stop tasks" chosen, so Enter exits (never "Move to background", which
+/// leaves the session running):
+///
+///   Background work is running
+///   The following will stop when you exit:
+///   monitor · cbar watch
+///   ❯ 1. Exit and stop tasks
+///     2. Move to background and exit
+///     3. Stay
+pub fn stop_tasks_prompt(screen: &str) -> bool {
+    let lines: Vec<&str> = screen.lines().collect();
+    let Some(at) = lines.iter().rposition(|l| l.contains("Background work is running")) else { return false };
+    lines[at..].iter().any(|l| chosen(l, "1.", "Exit and stop tasks"))
+}
+
+/// Whether LINE is a menu line `❯ N. LABEL…`, the chosen one.
+fn chosen(line: &str, number: &str, label: &str) -> bool {
+    line.trim_start().strip_prefix('❯').is_some_and(|rest| rest.trim_start().trim_start_matches(number).trim_start().starts_with(label))
+}
+
+/// Whether the bottom of SCREEN is Claude Code's folder-trust question,
+/// which it asks before it starts in a folder not yet trusted (and always in
+/// ~). Its default is "No, exit": cbar never answers it.
+///
+///   Quick safety check: Is this a project you created or one you trust? …
+///   ❯ No, exit
+///     Yes, I trust this folder
+///   Enter to confirm · Esc to cancel
+pub fn trust_prompt(screen: &str) -> bool {
+    // only what stands at the bottom: a conversation may quote the question
+    let lines: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail = &lines[lines.len().saturating_sub(16)..];
+    let text = tail.join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
+    text.contains("Is this a project you created or one you trust?")
+        && tail.iter().any(|l| l.trim_start().trim_start_matches('❯').trim() == "Yes, I trust this folder")
+        && tail.last().is_some_and(|l| l.contains("Enter to confirm"))
 }
 
 /// Wait up to LIMIT for PID to exit.
@@ -130,6 +170,32 @@ mod tests {
         assert!(!keep_worktree_prompt(&remove));
         assert!(!keep_worktree_prompt("❯ /exit\n  ❯ 1. Keep worktree\n")); // not after the question
         assert!(!keep_worktree_prompt("❯ \n  ⏵⏵ auto mode on\n"));
+    }
+
+    #[test]
+    fn sees_the_background_work_question() {
+        // as Claude Code 2.1.316 draws it after /exit with a background shell and a Monitor
+        let asked = "⏺ armed\n✻ Cogitated for 5s · done 11:22 AM · 1 shell, 1 monitor still running\n❯ /exit\n────────\n  Background work is running\n  The following will stop when you exit:\n  shell · sleep 900\n  monitor · probe\n  ❯ 1. Exit and stop tasks\n    2. Move to background and exit\n    3. Stay\n  Enter to confirm · Esc to cancel\n";
+        assert!(stop_tasks_prompt(asked));
+        let moved = asked.replace("  ❯ 1. Exit", "    1. Exit").replace("    2. Move", "  ❯ 2. Move");
+        assert!(!stop_tasks_prompt(&moved));
+        let stay = asked.replace("  ❯ 1. Exit", "    1. Exit").replace("    3. Stay", "  ❯ 3. Stay");
+        assert!(!stop_tasks_prompt(&stay));
+        assert!(!stop_tasks_prompt("❯ /exit\n  ❯ 1. Exit and stop tasks\n"));
+        assert!(!keep_worktree_prompt(asked) && !stop_tasks_prompt("  Exiting worktree session\n  ❯ 1. Keep worktree\n"));
+    }
+
+    #[test]
+    fn sees_the_folder_trust_question() {
+        // as Claude Code 2.1.316 draws it, at 160 columns and wrapped narrower
+        let wide = "────────\n Accessing workspace:\n\n /Users/x\n\n Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not,\n take a moment to review what's in this folder first.\n\n Claude Code'll be able to read, edit, and execute files here.\n\n Security guide\n\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel\n\n\n";
+        assert!(trust_prompt(wide));
+        let narrow = wide.replace("Is this a project you created or one", "Is this a project you\n created or one");
+        assert!(trust_prompt(&narrow));
+        // a conversation that quotes it, with Claude's prompt below
+        let quoted = format!("{wide}⏺ That was the trust prompt.\n────────\n❯ \n────────\n  ⏵⏵ auto mode on\n");
+        assert!(!trust_prompt(&quoted));
+        assert!(!trust_prompt(""));
     }
 
     #[test]

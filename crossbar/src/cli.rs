@@ -965,17 +965,29 @@ fn cmd_restart(home: &Home, args: Vec<String>) {
     if let Err(e) = mux::send_line(t.term, &session, &f.pane.block_id, "/exit") {
         util::warn(format!("could not type /exit: {e}"));
     }
-    // a Claude started with -w asks on /exit whether to keep its worktree: keep it
+    // Claude may ask on /exit: a -w Claude whether to keep its worktree (keep
+    // it), one with background work (a cbar watch Monitor) whether to stop it
+    // (exit and stop it); each is answered once, with Enter on that choice
     let until = Instant::now() + Duration::from_secs(20);
-    let mut answered = false;
+    let (mut kept, mut stopped) = (false, false);
     while util::alive(&cs.pid.to_string()) && Instant::now() < until {
         std::thread::sleep(Duration::from_millis(500));
-        if !answered && restart::keep_worktree_prompt(&mux::capture(t.term, &session, &f.pane.block_id, 60)) {
-            println!("it asks whether to keep its worktree: keeping it");
-            if let Err(e) = mux::send_enter(t.term, &session, &f.pane.block_id) {
-                util::warn(format!("could not answer it: {e}"));
-            }
-            answered = true;
+        if kept && stopped {
+            continue;
+        }
+        let screen = mux::capture(t.term, &session, &f.pane.block_id, 60);
+        let answer = if !kept && restart::keep_worktree_prompt(&screen) {
+            kept = true;
+            "it asks whether to keep its worktree: keeping it"
+        } else if !stopped && restart::stop_tasks_prompt(&screen) {
+            stopped = true;
+            "it asks whether to stop its background work: exiting and stopping it"
+        } else {
+            continue;
+        };
+        println!("{answer}");
+        if let Err(e) = mux::send_enter(t.term, &session, &f.pane.block_id) {
+            util::warn(format!("could not answer it: {e}"));
         }
     }
     if !restart::wait_exit(cs.pid, Duration::from_millis(500)) {
@@ -999,9 +1011,14 @@ fn cmd_restart(home: &Home, args: Vec<String>) {
     }
     sub.extend(["--resume", cs.id.as_str()]);
     let pane = mux::replace(t.term, &session, &f.pane.block_id, &dir, &f.pane.label, &pane_argv(&sub)).unwrap_or_else(|e| die(e));
-    // tell it why its system prompt changed, once it's up
+    // tell it why its system prompt changed, once it's up; if it asks to
+    // trust its folder, never answer (its default is "No, exit"): say so
     let until = Instant::now() + Duration::from_secs(90);
     loop {
+        // first: typing into that question would answer it
+        if restart::trust_prompt(&mux::capture(t.term, &session, &pane, 60)) {
+            die(format!("{}'s Claude is waiting at the folder-trust prompt for {}; answer it in its pane", t.path, short(&dir)));
+        }
         let st = t.panes().into_iter().find(|g| g.pane.block_id == pane).map(|g| g.pane.state).unwrap_or_default();
         if st == "idle" || st == "done" {
             break;

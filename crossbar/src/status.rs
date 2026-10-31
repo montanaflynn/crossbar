@@ -206,6 +206,11 @@ impl Looker {
             .or(records.first())
             .cloned()
             .unwrap_or(Value::Null);
+        // a status left by a program that has exited is stale
+        let root = match root["owner"]["pid"].as_i64() {
+            Some(pid) if !util::alive(&pid.to_string()) => Value::Null,
+            _ => root,
+        };
         let program = [&fg["script"], &fg["argv0"], &fg["name"]]
             .iter()
             .filter_map(|v| v.as_str())

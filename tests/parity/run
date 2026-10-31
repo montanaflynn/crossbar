@@ -49,6 +49,7 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 INTENDED = os.path.join(HERE, "intended.md")
 OUT = os.path.join(HERE, "out")   # the last run's outputs (gitignored)
+EXCHANGE = "central"   # the new side's exchange: 0.4's central keeps its name
 PROJECTS = {"alpha": "repo-a", "beta": "repo-b"}   # project: its folder under HOME
 AGENTS = {   # project: agent tabs started from fixtures/briefs, and the state each reports
     "alpha": {"t-done": "done", "t-ask": "blocked", "t-boom": "error", "t-busy": "working", "t-chat": "idle"},
@@ -111,6 +112,8 @@ class Sandbox:
             os.makedirs(d)
         for f in (".zshenv", ".zprofile", ".zshrc", ".zlogin"):
             open(os.path.join(self.zdot, f), "w").close()
+        with open(os.path.join(self.zdot, "shrc"), "w") as f:   # $ENV: what an interactive sh reads
+            f.write("PS1='$ '\n")
         shutil.copy(os.path.join(HERE, "stub", "claude"), os.path.join(self.stub, "claude"))
         # a real repo for alpha (agents get -w), a plain folder for beta
         a = os.path.join(self.home, PROJECTS["alpha"])
@@ -183,7 +186,9 @@ class Side:
             "CROSSBAR_CLAUDE": os.path.join(self.stub, "claude"),
             "CLAUDE_RELAY_PROGRAM": os.path.join(self.stub, "claude"),
             "CBAR_STUB_WORK": "2",
-            "PS1": "$ ",   # a shell's prompt, if old cbar types into one, without the host name
+            **({"REX_SERVER": f"unix://{self.rex_sock}"} if rex else {}),   # for the real rex in Rex's panes
+            "ENV": os.path.join(box.zdot, "shrc"),   # sh's prompt, if old cbar types into one: no host name
+            "PS1": "$ ",
         }
         self.mux = Rex(self) if rex else Tmux(self)
         self.panes_at = {}   # project or "central": (session id, its operator's/supervisor's pane)
@@ -192,12 +197,12 @@ class Side:
     def session(self, project=None):
         if self.name == "old":
             return project or "central"
-        return f"main/{project}" if project else "main"
+        return f"{EXCHANGE}/{project}" if project else EXCHANGE
 
     def briefs(self, project):
         if self.name == "old":
             return os.path.join(self.cb, "projects", project, "briefs")
-        return os.path.join(self.cb, "exchanges", "main", "projects", project, "briefs")
+        return os.path.join(self.cb, "exchanges", EXCHANGE, "projects", project, "briefs")
 
     def run(self, argv, pane=None, timeout=60, stdin=None):
         env = dict(self.env)
@@ -297,24 +302,38 @@ class Rex:
         self.check_shell()
 
     def check_shell(self):
-        """A Rex pane starts your login shell; make sure claude and rex in it
-        are the sandbox's, or stop before anything types `claude` into one."""
-        probe = os.path.join(self.side.box.root, f"probe-{self.side.name}")
-        self("new", "_probe", "-c", self.side.box.home, "--json", check=True)
+        """What runs in a Rex pane gets your login environment, with Rex's own
+        bin folder first: make sure that, in a shell pane and in a pane running
+        a command, claude is the stub, claude-relay runs the stub, the crossbar
+        settings carry over and rex reaches this private server (through
+        $REX_SERVER), or stop before anything types `claude` into a pane."""
+        root = self.side.box.root
+        report = 'echo "claude=$(command -v claude)"; echo "relay=$CLAUDE_RELAY_PROGRAM"; ' \
+                 'echo "home=$CROSSBAR_HOME"; echo "sessions=$(rex --autostart=false ls --json | grep -c session_id)"'
+        probes = {"shell": os.path.join(root, f"probe-{self.side.name}-shell"),
+                  "command": os.path.join(root, f"probe-{self.side.name}-command")}
+        self("new", "_probe_shell", "-c", self.side.box.home, "--json", check=True)
+        self("new", "_probe_command", "-c", self.side.box.home, "--json", "--", "/bin/sh", "-c",
+             f"{{ {report}; }} > {probes['command']}.tmp; mv {probes['command']}.tmp {probes['command']}; sleep 30",
+             check=True)
         time.sleep(1)
-        self("send", "-s", "_probe", f"command -v claude rex > {probe}; echo $ZDOTDIR >> {probe}\r")
-        for _ in range(50):
-            if os.path.exists(probe) and len(open(probe).read().splitlines()) >= 3:
+        self("send", "-s", "_probe_shell", f"{{ {report}; }} > {probes['shell']}.tmp; mv {probes['shell']}.tmp {probes['shell']}\r")
+        for _ in range(75):
+            if all(os.path.exists(p) for p in probes.values()):
                 break
             time.sleep(0.2)
-        sid = self.session_id("_probe")
-        if sid:
-            self("kill", sid)
-        found = open(probe).read().split() if os.path.exists(probe) else []
-        want = [os.path.join(self.side.stub, "claude"), os.path.join(self.side.stub, "rex")]
-        if found[:2] != want:
-            raise RuntimeError(f"a Rex pane's shell finds {found[:2] or 'nothing'}, not the sandbox's "
-                               f"claude and rex; not running Rex cases (is your login shell zsh?)")
+        for name in ("_probe_shell", "_probe_command"):
+            sid = self.session_id(name)
+            if sid:
+                self("kill", sid)
+        want = {"claude": os.path.join(self.side.stub, "claude"), "relay": os.path.join(self.side.stub, "claude"),
+                "home": self.side.cb, "sessions": "2"}
+        for kind, probe in probes.items():
+            got = dict(l.split("=", 1) for l in open(probe).read().splitlines() if "=" in l) if os.path.exists(probe) else {}
+            bad = {k: got.get(k, "nothing") for k, v in want.items() if got.get(k) != v}
+            if bad:
+                raise RuntimeError(f"in a Rex {kind} pane, {bad} isn't the sandbox's ({want}); "
+                                   f"not running Rex cases")
 
     def stop(self):
         if self.server and self.server.poll() is None:
@@ -428,7 +447,7 @@ def setup(side):
                                 [os.path.join(s.bin, "claude-relay"), "-n", "supervisor"])
         s.mux.split("central", sup, box.home, [os.path.join(s.bin, "switchboard")], "switchboard")
     else:
-        record("new-exchange", s, s.run(["cbar", "new", "--exchange", "main", term]))
+        record("new-exchange", s, s.run(["cbar", "new", "--exchange", EXCHANGE, term]))
     for project, folder in PROJECTS.items():
         record(f"new-project-{project}", s, s.run(["cbar", "new", project, os.path.join(box.home, folder), term]))
     want = {(s.session(), "supervisor"): "idle"}
@@ -543,6 +562,19 @@ def watch_restart_case(case, side):
     return ("watch ran" if code in (-signal.SIGTERM, 0, 143) else code), open(log).read(), open(log + ".err").read()
 
 
+def leftovers(side):
+    """What of this side still runs 2s after its tmux or Rex server stopped:
+    nothing should, as every pane's terminal is gone."""
+    time.sleep(2)
+    pids = set()
+    for mark in (side.bin, side.stub):
+        pids |= {x for x in sh(["pgrep", "-f", mark]).stdout.split() if x.isdigit()}
+    if not pids:
+        return 0, "", ""
+    ps = sh(["ps", "-o", "args=", "-p", ",".join(sorted(pids))]).stdout
+    return len(pids), "".join(sorted(ps.splitlines(True))), ""
+
+
 def setup_case(case, side):
     return SETUP.get(case.name, {}).get(side.name, ("not run", "", ""))
 
@@ -562,10 +594,10 @@ def cases():
         C("board-main-once", ["switchboard", "--once"]),
         C("board-main-once-color", ["switchboard", "--once"], kind="color"),
         C("board-main-json", ["switchboard", "--json"], kind="json"),
-        C("board-central-once", ["switchboard", "--once", "--session", "central"], ["switchboard", "--once", "--session", "main"]),
-        C("board-local-once", ["switchboard", "--once", *alpha], ["switchboard", "--once", "--session", "main/alpha"]),
-        C("board-local-once-color", ["switchboard", "--once", *alpha], ["switchboard", "--once", "--session", "main/alpha"], kind="color"),
-        C("board-local-json", ["switchboard", "--json", *alpha], ["switchboard", "--json", "--session", "main/alpha"], kind="json"),
+        C("board-central-once", ["switchboard", "--once", "--session", "central"], ["switchboard", "--once", "--session", EXCHANGE]),
+        C("board-local-once", ["switchboard", "--once", *alpha], ["switchboard", "--once", "--session", f"{EXCHANGE}/alpha"]),
+        C("board-local-once-color", ["switchboard", "--once", *alpha], ["switchboard", "--once", "--session", f"{EXCHANGE}/alpha"], kind="color"),
+        C("board-local-json", ["switchboard", "--json", *alpha], ["switchboard", "--json", "--session", f"{EXCHANGE}/alpha"], kind="json"),
         C("board-here-once", ["cbar", "board", "--here", "--once"], pane="alpha"),
         C("board-here-json", ["cbar", "board", "--here", "--json"], pane="alpha", kind="json"),
         C("agent-ls", ["cbar", "agent", "ls"], pane="alpha"),
@@ -614,6 +646,7 @@ def cases():
         C("close-boom", ["cbar", "agent", "close", "-f", "t-boom"], pane="alpha"),
         C("rm-project", ["cbar", "rm", "-y", "beta"]),
         C("ls-after-rm", ["cbar", "ls"]),
+        C("leftovers", None, run=lambda c, s: None),   # filled in after the side's server stops
     ]
 
 
@@ -679,27 +712,16 @@ def sgr(style, params):
 
 
 def names(side, text):
-    """The exchange naming: 0.4's `central` is 0.5's `main`, project `alpha`'s
-    session is `main/alpha`. Applied to the old side."""
+    """The exchange naming: 0.4's `central` is the exchange `central`, and
+    project `alpha`'s session is `central/alpha`. Applied to the old side."""
     if side.name != "old":
         return text
-    text = "\n".join(keep_width(l, re.sub(r"\bcentral\b", "main", l)) for l in text.split("\n"))
     ps = "|".join(PROJECTS)
-    text = re.sub(rf"(session '|\"label\": \"|=)({ps})\b", r"\1main/\2", text)
-    text = text.replace("~/.crossbar/projects/", "~/.crossbar/exchanges/main/projects/")
+    text = re.sub(rf"(session '|\"label\": \"|=)({ps})\b", rf"\1{EXCHANGE}/\2", text)
+    for d in ("projects", "central"):
+        to = f"exchanges/{EXCHANGE}/projects" if d == "projects" else f"exchanges/{EXCHANGE}"
+        text = text.replace(f"~/.crossbar/{d}/", f"~/.crossbar/{to}/")
     return text
-
-
-def keep_width(before, after):
-    """AFTER, widened back to BEFORE's width where a rename made it shorter, by
-    stretching its longest run of rule or spaces (a card header, the board's
-    top line), so a renamed card isn't a diff on its own."""
-    short = len(before) - len(after)
-    runs = list(re.finditer(r"─{2,}| {2,}", after))
-    if short <= 0 or not runs:
-        return after
-    m = max(runs, key=lambda m: m.end() - m.start())
-    return after[:m.end()] + m.group(0)[0] * short + after[m.end():]
 
 
 def common(side, text):
@@ -837,13 +859,17 @@ def reap(root):
     """Kill anything still running from the sandbox (its path in the command line)."""
     p = sh(["pgrep", "-f", root])
     pids = [int(x) for x in p.stdout.split() if x.isdigit() and int(x) != os.getpid()]
+    if not pids:
+        return
+    ps = sh(["ps", "-o", "pid=,args=", "-p", ",".join(map(str, pids))]).stdout
     for pid in pids:
         try:
             os.kill(pid, signal.SIGKILL)
         except OSError:
             pass
-    if pids:
-        say(f"parity: killed {len(pids)} leftover process(es)")
+    say(f"parity: killed {len(pids)} process(es) still running after their server stopped:")
+    for line in ps.splitlines():
+        say("  " + line.strip().replace(root, "$SANDBOX")[:160])
 
 
 def run(a, checkout, root):
@@ -878,6 +904,8 @@ def run(a, checkout, root):
                 continue
             results.setdefault(c.name, {})[side.name] = c_side.execute(side)
         side.mux.stop()   # the next side starts from nothing
+        if any(c.name == "leftovers" for c in todo):
+            results.setdefault("leftovers", {})[side.name] = leftovers(side)
 
     intended, _ = read_intended()
     accept = {}

@@ -18,9 +18,10 @@ Applied to both sides' output before comparing; the summary says which strip rul
 - Escape sequences: removed, except in `-color` cases, where each run of text is shown with its
   style (`[fg=#be95ff b]…[/]`), however the SGR codes were written.
 - `--json`: groups sorted by label, panes by tab and label, keys sorted.
-- Exchange naming (old side only): `central` is `main`; project `alpha`'s session (`session 'alpha'`,
-  `=alpha`, a JSON `"label": "alpha"`) is `main/alpha`; `~/.crossbar/projects/` is
-  `~/.crossbar/exchanges/main/projects/`.
+- Exchange naming (old side only): the new side's exchange is `central`, so 0.4's `central` keeps
+  its name; project `alpha`'s session (`session 'alpha'`, `=alpha`, a JSON `"label": "alpha"`) is
+  `central/alpha`; `~/.crossbar/projects/` is `~/.crossbar/exchanges/central/projects/` and
+  `~/.crossbar/central/` is `~/.crossbar/exchanges/central/`.
 - Strip rule `deprecation-note` (new side's stderr): `cbar: \`cbar agent …\` is deprecated; use
   \`cbar …\``. The old forms are kept as aliases with a note (exchanges.md), so cases that run an
   old form would otherwise all differ by that line.
@@ -62,7 +63,7 @@ The main board shows one exchange and names it in its subtitle (exchanges.md).
 +++ new
 @@ -1,3 +1,3 @@
 -◇ switchboard agents & panes by session                                                        HH:MM
-+◇ switchboard main · agents & panes by session                                                 HH:MM
++◇ switchboard central · agents & panes by session                                              HH:MM
  ◆ 1 blocked  ✗ 1 error  ✓ 2 done  ⠋ 1 working  ○ 4 idle
  
 ```
@@ -76,14 +77,14 @@ The same as board-main-once, with colors.
 +++ new
 @@ -1,3 +1,3 @@
 -[b fg=#be95ff]◇[/] [b fg=#be95ff]switchboard[/] [fg=#7b7c7e]agents[/] [fg=#7b7c7e]&[/] [fg=#7b7c7e]panes[/] [fg=#7b7c7e]by[/] [fg=#7b7c7e]session[/]                                                        [fg=#7b7c7e]HH:MM[/]
-+[b fg=#be95ff]◇[/] [b fg=#be95ff]switchboard[/] [fg=#7b7c7e]main[/] [fg=#7b7c7e]·[/] [fg=#7b7c7e]agents[/] [fg=#7b7c7e]&[/] [fg=#7b7c7e]panes[/] [fg=#7b7c7e]by[/] [fg=#7b7c7e]session[/]                                                 [fg=#7b7c7e]HH:MM[/]
++[b fg=#be95ff]◇[/] [b fg=#be95ff]switchboard[/] [fg=#7b7c7e]central[/] [fg=#7b7c7e]·[/] [fg=#7b7c7e]agents[/] [fg=#7b7c7e]&[/] [fg=#7b7c7e]panes[/] [fg=#7b7c7e]by[/] [fg=#7b7c7e]session[/]                                              [fg=#7b7c7e]HH:MM[/]
  [fg=#ee5396]◆[/] [fg=#ee5396]1[/] [fg=#ee5396]blocked[/]  [fg=#ff7eb6]✗[/] [fg=#ff7eb6]1[/] [fg=#ff7eb6]error[/]  [fg=#25be6a]✓[/] [fg=#25be6a]2[/] [fg=#25be6a]done[/]  [fg=#78a9ff]⠋[/] [fg=#78a9ff]1[/] [fg=#78a9ff]working[/]  [fg=#7b7c7e]○[/] [fg=#7b7c7e]4[/] [fg=#7b7c7e]idle[/]
  
 ```
 
 ## err-agent-new-exists
 
-Names the session, which now carries the exchange (`main/alpha`).
+Names the session, which now carries the exchange (`central/alpha`).
 
 ```diff
 --- old
@@ -92,7 +93,7 @@ Names the session, which now carries the exchange (`main/alpha`).
  
  --- stderr
 -cbar: this session already has a tab 't-done'
-+cbar: session 'main/alpha' already has a tab 't-done'
++cbar: session 'central/alpha' already has a tab 't-done'
  --- exit 1
 ```
 
@@ -177,7 +178,7 @@ Paths: the same message as err-open-none.
 
 ## err-rm-notty
 
-The project's path carries the exchange (`main/beta`).
+The project's path carries the exchange (`central/beta`).
 
 ```diff
 --- old
@@ -186,7 +187,7 @@ The project's path carries the exchange (`main/beta`).
  
  --- stderr
 -cbar: pass -y to remove 'beta' without asking
-+cbar: pass -y to remove 'main/beta' without asking
++cbar: pass -y to remove 'central/beta' without asking
  --- exit 1
 ```
 
@@ -214,7 +215,7 @@ Any diff. `cbar agent` is a deprecated alias; its help maps each form to the pat
 -alpha  tmux      ~/repo-a  running  idle
 -beta   tmux      ~/repo-b  running  idle
 +NAME           TERMINAL  PATH      SESSION  CLAUDE
-+main           tmux      ~         running  supervisor idle
++central        tmux      ~         running  supervisor idle
 +├─ alpha       tmux      ~/repo-a  running  operator idle
 +│  ├─ t-done                                done now
 +│  ├─ t-ask                                 blocked now
@@ -237,7 +238,7 @@ The same tree as ls, after t-done and t-boom were closed and beta removed.
 -NAME   TERMINAL  PATH      SESSION  OPERATOR
 -alpha  tmux      ~/repo-a  running  idle
 +NAME          TERMINAL  PATH      SESSION  CLAUDE
-+main          tmux      ~         running  supervisor idle
++central       tmux      ~         running  supervisor idle
 +└─ alpha      tmux      ~/repo-a  running  operator idle
 +   ├─ t-ask                                blocked 1m
 +   ├─ t-busy                               working 1m
@@ -248,42 +249,42 @@ The same tree as ls, after t-done and t-boom were closed and beta removed.
 
 ## new-project-alpha
 
-The hint names the project by its path (`/main/alpha`).
+The hint names the project by its path (`/central/alpha`).
 
 ```diff
 --- old
 +++ new
 @@ -1,3 +1,3 @@
- created session 'main/alpha' in ~/repo-a with an operator and a switchboard (tmux)
+ created session 'central/alpha' in ~/repo-a with an operator and a switchboard (tmux)
 -attach: cbar open alpha
-+attach: cbar open /main/alpha
++attach: cbar open /central/alpha
  --- exit 0
 ```
 
 ## new-project-beta
 
-The hint names the project by its path (`/main/beta`).
+The hint names the project by its path (`/central/beta`).
 
 ```diff
 --- old
 +++ new
 @@ -1,3 +1,3 @@
- created session 'main/beta' in ~/repo-b with an operator and a switchboard (tmux)
+ created session 'central/beta' in ~/repo-b with an operator and a switchboard (tmux)
 -attach: cbar open beta
-+attach: cbar open /main/beta
++attach: cbar open /central/beta
  --- exit 0
 ```
 
 ## rm-project
 
-The project's path carries the exchange (`main/beta`).
+The project's path carries the exchange (`central/beta`).
 
 ```diff
 --- old
 +++ new
 @@ -1,2 +1,2 @@
 -removed beta
-+removed main/beta
++removed central/beta
  --- exit 0
 ```
 
@@ -295,7 +296,7 @@ The project's path carries the exchange (`main/beta`).
 --- old
 +++ new
 @@ -1,3 +1,2 @@
--$BIN/claude-relay -n t-chat -w t-chat Read\ ~/.crossbar/exchanges/main/projects/alpha/briefs/t-chat.md\ and\ do\ the\ task\ it\ describes.Macbook-Prohe\ task\ it\ describes.$BIN/claude-relay -n t-chat -w t-chat Read\ ~/.crossbar/exchanges/main/projects/alpha/briefs/t-chat.md\ and\ do\ t 
+-$BIN/claude-relay -n t-chat -w t-chat Read\ ~/.crossbar/exchanges/central/projects/alpha/briefs/t-chat.md\ and\ do\ the\ task\ it\ describes.$ $BIN/claude-relay -n t-chat -w t-chat Read\ ~/.crossbar/exchanges/central/projects/alpha/briefs/t-chat.md\ and\ do\ the\ task\ it\ describes.
  stub claude: t-chat
  worktree: t-chat
 ```

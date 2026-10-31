@@ -34,6 +34,9 @@ pub struct Pane {
     pub kind: String,
     pub msg: String,
     pub since: String,
+    /// When it entered that state (ISO 8601), as reported.
+    #[serde(skip)]
+    pub since_at: String,
 }
 
 /// A card: a session, or (scoped to one session) a tab.
@@ -231,6 +234,7 @@ impl Looker {
             kind: s(&root["kind"]),
             msg: util::text(root["msg"].as_str().unwrap_or("")),
             since: util::age(root["updated_at"].as_str().unwrap_or("")),
+            since_at: root["updated_at"].as_str().unwrap_or("").to_string(),
         })
     }
 
@@ -275,11 +279,10 @@ impl Looker {
     }
 
     /// One Rex session, grouped by tab, in tab order.
-    pub fn rex_tabs(&self, sid: &str, label: &str) -> Snapshot {
+    pub fn rex_tabs(&self, sid: &str) -> Snapshot {
         let (windows, blocks) = Self::rex_layout(sid);
         let tabs: HashMap<String, String> = windows.iter().cloned().collect();
         let panes = parallel(&blocks, |b| self.rex_pane(sid, b, &tabs));
-        let _ = label;
         windows
             .iter()
             .map(|(wid, wl)| {
@@ -348,6 +351,7 @@ impl Looker {
             kind,
             msg,
             since: util::age(&since),
+            since_at: since,
         })
     }
 
@@ -387,7 +391,7 @@ impl Looker {
     pub fn snapshot(&self, scope: Option<&str>) -> Snapshot {
         match scope {
             Some(s) if mux::is_tmux_id(s) => self.tmux_snapshot(Some(s)),
-            Some(s) => self.rex_tabs(s, ""),
+            Some(s) => self.rex_tabs(s),
             None => {
                 let mut all = self.rex_snapshot();
                 all.extend(self.tmux_snapshot(None));

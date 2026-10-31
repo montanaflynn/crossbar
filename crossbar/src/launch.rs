@@ -6,7 +6,6 @@
 //! to your login shell when it exits, so the pane stays open as it did when
 //! the command was typed into a shell. Nothing depends on which shell that is.
 
-use std::ffi::CString;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
@@ -166,7 +165,3 @@ pub fn show(argv: &[String]) -> String {
         .join(" ")
 }
 
-#[allow(dead_code)]
-fn cstring(s: &str) -> CString {
-    CString::new(s).unwrap_or_default()
-}

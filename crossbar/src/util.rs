@@ -18,9 +18,19 @@ pub fn set_prog(name: &'static str) {
     let _ = PROG.set(name);
 }
 
+static ON_DIE: std::sync::OnceLock<fn() -> !> = std::sync::OnceLock::new();
+
+/// What die does instead of exiting (`cbar run --pane`: become the login shell).
+pub fn on_die(f: fn() -> !) {
+    let _ = ON_DIE.set(f);
+}
+
 /// Print `PROG: MSG` to stderr and exit 1.
 pub fn die(msg: impl AsRef<str>) -> ! {
     eprintln!("{}: {}", prog(), msg.as_ref());
+    if let Some(f) = ON_DIE.get() {
+        f()
+    }
     std::process::exit(1)
 }
 

@@ -51,7 +51,6 @@ exchange), `stats` is its project. `/main/stats` is absolute, `..` goes up.
                                      error, stops or closes (operators: their agents; supervisors:
                                      their agents and their projects' operators)
   board [EXCHANGE|PROJECT] [--all]   the switchboard (--once prints once, --json prints JSON)
-  migrate [-n]                       move a 0.4 layout (central/, projects/) into exchanges/main
   update                             install the latest crossbar from GitHub
   version                            the installed version
   run supervisor|operator|board|agent  what cbar starts in the panes it makes
@@ -97,7 +96,6 @@ pub fn main(args: Vec<String>) {
         "watch" => cmd_watch(),
         "board" => cmd_board(&home, rest),
         "run" => cmd_run(&home, rest),
-        "migrate" => crate::migrate::main(&home, rest),
         "update" => cmd_update(&home),
         "version" | "--version" => println!("{}", version(&home)),
         "supervisor" => {
@@ -230,7 +228,7 @@ fn cmd_new(home: &Home, args: Vec<String>) {
     let usage = "cbar new PATH [DIR|BRIEF] [--tmux|--rex] [--no-worktree] [--agent] [--exchange]";
     let a = parse(&args, &["--tmux", "--rex", "--no-worktree", "--agent", "--exchange"], usage);
     let Some(path) = a.pos.first() else { die(format!("usage: {usage}")) };
-    home.require_migrated();
+    home.require_layout();
     if a.has("--exchange") {
         return new_exchange(home, path.trim_matches('/'), a.term());
     }
@@ -398,17 +396,21 @@ fn cmd_run(home: &Home, args: Vec<String>) {
     let usage = "cbar run [--pane] supervisor|operator|board|agent [PATH] [--no-worktree]";
     let a = parse(&args, &["--pane", "--no-worktree"], usage);
     let pane = a.has("--pane");
+    if pane {
+        // a pane started for this: if it fails, keep the message on screen
+        util::on_die(launch::login_shell);
+    }
     let Some(role) = a.pos.first().map(String::as_str) else { die(format!("usage: {usage}")) };
     let node = match a.pos.get(1) {
         Some(p) => {
-            home.require_migrated();
-            resolve(home, p, if role == "agent" { Want::New { agent: false } } else { Want::Existing })
+            home.require_layout();
+            resolve(home, p, if role == "agent" { Want::New { agent: true } } else { Want::Existing })
         }
         None => paths::here(home),
     };
     match role {
         "supervisor" => {
-            home.require_migrated();
+            home.require_layout();
             let e = node.exchange().unwrap_or_else(|| die("no exchange here")).to_string();
             let dir = home.exchange_dir(&e);
             for d in ["briefs", "reports", "projects"] {
@@ -424,7 +426,7 @@ fn cmd_run(home: &Home, args: Vec<String>) {
             claude(&[format!("{e} supervisor"), prompt], &[], pane)
         }
         "operator" => {
-            home.require_migrated();
+            home.require_layout();
             let (e, p) = match &node {
                 Node::Project(e, p) => (e.clone(), p.clone()),
                 Node::Agent { exchange, project: Some(p), .. } => (exchange.clone(), p.clone()),
@@ -490,7 +492,7 @@ const SHELLS: [&str; 9] = ["zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "
 
 fn cmd_up(home: &Home, args: Vec<String>) {
     let a = parse(&args, &["--tmux", "--rex"], "cbar up [EXCHANGE] [--tmux|--rex]");
-    home.require_migrated();
+    home.require_layout();
     let e = match a.pos.first() {
         Some(e) => e.trim_matches('/').to_string(),
         None => paths::here(home).exchange().map(String::from).unwrap_or_else(|| home.default_exchange()),
@@ -508,11 +510,11 @@ fn cmd_up(home: &Home, args: Vec<String>) {
         }
     }
     let all = status::flatten(Looker::new(false).snapshot(None));
-    let legacy = e == home.default_exchange() && home.migrated().is_some();
+    let legacy = e == home.default_exchange();
 
     let dir = util::home().to_string_lossy().into_owned();
     if legacy && !mux::session_running(&e, term) && all.iter().any(|f| f.group == "central" && f.mux == term.as_str()) {
-        println!("{e}: running as 'central' (its 0.4 name; cbar migrate renames it)");
+        println!("{e}: running as 'central' (its 0.4 name; rename it to {e}, see MIGRATING.md)");
     } else {
         up_one(&all, &e, &dir, term, SUPERVISOR, &format!("/{e}"));
     }
@@ -523,7 +525,7 @@ fn cmd_up(home: &Home, args: Vec<String>) {
         }
         let session = p.session();
         if legacy && !mux::session_running(&session, p.terminal) && all.iter().any(|f| f.group == p.name && f.mux == p.terminal.as_str()) {
-            println!("{session}: running as '{}' (its 0.4 name; cbar migrate renames it)", p.name);
+            println!("{session}: running as '{}' (its 0.4 name; rename it to {session}, see MIGRATING.md)", p.name);
             continue;
         }
         up_one(&all, &session, &p.path, p.terminal, OPERATOR, &format!("/{session}"));
@@ -590,7 +592,7 @@ impl Tree<'_> {
         if panes.is_empty() {
             if let Some(old) = legacy {
                 panes = self.session_panes(old, term);
-                session = format!("running as '{old}' (cbar migrate)");
+                session = format!("running as '{old}' (0.4 name)");
             }
         }
         if panes.is_empty() {
@@ -645,7 +647,7 @@ impl Tree<'_> {
     }
 
     fn exchange(&mut self, home: &Home, x: &layout::Exchange, only_project: Option<&str>) {
-        let legacy = x.name == home.default_exchange() && home.migrated().is_some();
+        let legacy = x.name == home.default_exchange();
         let has = |g: &str, t: Term| self.all.iter().any(|f| f.group == g && f.mux == t.as_str());
         let term = x.terminal.unwrap_or_else(|| if has(&x.name, Term::Tmux) { Term::Tmux } else { Term::Rex });
         let projects: Vec<_> = home.projects(&x.name).into_iter().filter(|p| only_project.is_none_or(|o| o == p.name)).collect();
@@ -678,7 +680,7 @@ impl Tree<'_> {
 
 fn cmd_ls(home: &Home, args: Vec<String>) {
     let a = parse(&args, &[], "cbar ls [PATH]");
-    home.require_migrated();
+    home.require_layout();
     let node = a.pos.first().map(|p| resolve(home, p, Want::Existing));
     let exchanges = home.exchanges();
     if exchanges.is_empty() {
@@ -713,7 +715,7 @@ fn cmd_ls(home: &Home, args: Vec<String>) {
 fn cmd_open(home: &Home, args: Vec<String>) {
     let a = parse(&args, &["-n"], "cbar open [-n] PATH");
     let Some(path) = a.pos.first() else { die("usage: cbar open [-n] PATH") };
-    home.require_migrated();
+    home.require_layout();
     let node = resolve(home, path, Want::Existing);
     let t = target(home, &node);
     let (window, pane) = match node {
@@ -762,7 +764,7 @@ fn cmd_open(home: &Home, args: Vec<String>) {
 }
 
 fn pane_target(home: &Home, path: &str) -> (Target, Flat) {
-    home.require_migrated();
+    home.require_layout();
     let node = resolve(home, path, Want::Existing);
     let t = target(home, &node);
     let f = t.get();
@@ -879,7 +881,7 @@ fn count(dir: &Path) -> usize {
 fn cmd_rm(home: &Home, args: Vec<String>) {
     let a = parse(&args, &["-y", "--yes", "-f", "--force"], "cbar rm [-y] [-f] PATH");
     let Some(path) = a.pos.first() else { die("usage: cbar rm [-y] [-f] PATH") };
-    home.require_migrated();
+    home.require_layout();
     let yes = a.has("-y") || a.has("--yes");
     let here = paths::here(home);
     let node = match paths::resolve(home, &here, path, Want::Existing, &paths::tab_exists) {
@@ -1069,7 +1071,7 @@ fn cmd_board(home: &Home, args: Vec<String>) {
             argv.push(a.clone());
             continue;
         }
-        home.require_migrated();
+        home.require_layout();
         match resolve(home, a, Want::Existing) {
             Node::Exchange(e) => argv.extend(["--exchange".to_string(), e]),
             n @ (Node::Project(..) | Node::Agent { .. }) => argv.extend(["--session".to_string(), n.session().unwrap()]),
@@ -1105,7 +1107,7 @@ fn cmd_agent(home: &Home, args: Vec<String>) {
     if mux::here_terminal().is_none() {
         die("run this inside a project's tmux or Rex pane");
     }
-    home.require_migrated();
+    home.require_layout();
     let here = paths::here(home);
     let in_tab = |task: &str| match &here {
         Node::Project(e, p) => Node::Agent { exchange: e.clone(), project: Some(p.clone()), name: task.into() },

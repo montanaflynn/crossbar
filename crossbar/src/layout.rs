@@ -129,21 +129,21 @@ impl Home {
     }
 
     /// Whether this home still has the 0.4 layout (central/ and projects/ as
-    /// real folders, no exchanges/), which `cbar migrate` converts.
-    pub fn needs_migrate(&self) -> bool {
+    /// real folders, no exchanges/).
+    pub fn old_layout(&self) -> bool {
         let real_dir = |p: PathBuf| fs::symlink_metadata(&p).map(|m| m.is_dir()).unwrap_or(false);
         !self.exchanges_dir().is_dir() && (real_dir(self.root.join("projects")) || real_dir(self.root.join("central")))
     }
 
-    /// Stop with a pointer to `cbar migrate` if this home has the old layout.
-    pub fn require_migrated(&self) {
+    /// Stop with a pointer to MIGRATING.md if this home has the 0.4 layout.
+    pub fn require_layout(&self) {
         let left = self.root.join("projects");
-        if !self.needs_migrate() && fs::symlink_metadata(&left).is_ok_and(|m| m.is_dir()) {
-            util::warn(format!("{} is a 0.4 folder again; `cbar migrate` moves what's in it", util::short(&left)));
+        if !self.old_layout() && fs::symlink_metadata(&left).is_ok_and(|m| m.is_dir()) {
+            util::warn(format!("{} is a 0.4 folder: what's in it isn't in exchanges/ (see MIGRATING.md)", util::short(&left)));
         }
-        if self.needs_migrate() {
+        if self.old_layout() {
             util::die(format!(
-                "{} has the 0.4 layout (central/, projects/); run `cbar migrate` to move it into exchanges/{}",
+                "{} has the 0.4 layout (central/, projects/); move it into exchanges/{} first (see MIGRATING.md)",
                 util::short(&self.root),
                 DEFAULT_EXCHANGE
             ));
@@ -155,22 +155,8 @@ impl Home {
     }
 
     pub fn set_default_exchange(&self, ex: &str) -> std::io::Result<()> {
-        self.write_config(ex, toml_get(&self.config(), "migrated").as_deref())
-    }
-
-    /// When `cbar migrate` converted a 0.4 layout here, if it did: until its
-    /// sessions are renamed, their 0.4 names (`central`, `stats`) still count.
-    pub fn migrated(&self) -> Option<String> {
-        toml_get(&self.config(), "migrated")
-    }
-
-    pub fn write_config(&self, ex: &str, migrated: Option<&str>) -> std::io::Result<()> {
         fs::create_dir_all(&self.root)?;
-        let mut text = format!("default_exchange = {}\n", toml_str(ex));
-        if let Some(m) = migrated {
-            text.push_str(&format!("migrated = {}\n", toml_str(m)));
-        }
-        write_file(&self.config(), &text)
+        write_file(&self.config(), &format!("default_exchange = {}\n", toml_str(ex)))
     }
 
     pub fn exchange_exists(&self, ex: &str) -> bool {
@@ -289,15 +275,15 @@ mod tests {
         let p = h.project("main", "stats").unwrap();
         assert_eq!((p.path.as_str(), p.terminal, p.session()), ("/tmp/c", Term::Tmux, "main/stats".to_string()));
         assert_eq!(h.exchanges().len(), 1);
-        assert!(!h.needs_migrate());
+        assert!(!h.old_layout());
         let _ = fs::remove_dir_all(&h.root);
     }
 
     #[test]
-    fn old_layout_needs_migrate() {
+    fn old_layout_old_layout() {
         let h = sandbox("old");
         fs::create_dir_all(h.root.join("projects/stats")).unwrap();
-        assert!(h.needs_migrate());
+        assert!(h.old_layout());
         let _ = fs::remove_dir_all(&h.root);
     }
 

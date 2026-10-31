@@ -441,10 +441,14 @@ def glyph(state, tick):
     return {"blocked": "◆", "error": "✗", "done": "✓", "idle": "○"}.get(state, "·")
 
 
+def is_board(p):
+    return not p["state"] and (p["program"] == "switchboard" or p["label"] == "switchboard")
+
+
 def card(number, session, panes, cols, tick, selected, scoped=False):
     """Lines for one session card (or, scoped, one tab card), plus a target per
-    line (what a click there means)."""
-    panes = sorted(panes, key=lambda p: rank(p["state"]))
+    line (what a click there means). Switchboards are left off."""
+    panes = sorted((p for p in panes if not is_board(p)), key=lambda p: rank(p["state"]))
     top = panes[0]["state"] if panes else ""
     edge = COLORS.get(top, FAINT) if top in ("blocked", "error", "done", "working") else FAINT
     inner = cols - 4
@@ -453,14 +457,14 @@ def card(number, session, panes, cols, tick, selected, scoped=False):
     sid = session["session_id"]
     head_target = ("tab", sid, session["window_id"], None) if scoped else ("session", sid, None, None)
 
-    num = f"{number} " if number <= 9 else ""
+    num = f" {number} " if number <= 9 else ""
     tag = " tmux" if session.get("mux") == "tmux" and not scoped else ""
-    title = f" {num}{session['label']}{tag} "
-    path = fit(home, max(inner - len(title) - 4, 0))
-    path_part = f" {path} " if path else ""
-    rule = "─" * max(cols - 3 - len(title) - len(path_part) - 1, 1)
-    lines = [f"{edge}╭─{RESET} {MUTED}{num}{RESET}{BOLD}{FG}{session['label']}{RESET}{DIM}{tag}{RESET} "
-             f"{edge}{rule}{RESET}{MUTED}{path_part}{RESET}{edge}─╮{RESET}"]
+    title = f" {session['label']}{tag} "
+    path = fit(home, max(inner - len(title) - len(num) - 4, 0))
+    path_part = f"{path} " if path else ""
+    rule = "─" * max(cols - 4 - len(title) - len(path_part) - len(num), 1)
+    lines = [f"{edge}╭─{RESET} {BOLD}{FG}{session['label']}{RESET}{DIM}{tag}{RESET} "
+             f"{MUTED}{path_part}{RESET}{edge}{rule}{RESET}{MUTED}{num}{RESET}{edge}─╮{RESET}"]
     targets = [head_target]
 
     def row(content, target=None, hot=False):
@@ -490,12 +494,11 @@ def card(number, session, panes, cols, tick, selected, scoped=False):
         else:
             name = p["tab"] or p["program"]
         name = fit(name, 16)
-        board = not is_agent and p["program"] == "switchboard"
-        mark = glyph(p["state"], tick) if is_agent else ("◇" if board else "▪")
+        mark = glyph(p["state"], tick) if is_agent else "▪"
         word = p["state"] if is_agent else p["program"]
-        right = p["since"] if is_agent else ("view" if board else "process")
+        right = p["since"] if is_agent else "process"
         name_color = FG if is_agent or hot else MUTED
-        mark_color = color if is_agent else (ACCENT if board else FAINT)
+        mark_color = color if is_agent else FAINT
         left = (f"{mark_color}{mark}{RESET} {name_color}{BOLD if hot else ''}{name:<16}{RESET}"
                 f" {color if is_agent else MUTED}{word}{RESET}")
         if p["cwd"] and p["cwd"] != home:
@@ -515,6 +518,17 @@ def card(number, session, panes, cols, tick, selected, scoped=False):
 # what a local board calls the main switchboard: the label of the session it
 # runs in, once found (Board.refresh looks), else "central"
 MAIN_LABEL = "central"
+CENTRAL = None   # the main switchboard's session: card 0 on the main board
+
+
+def numbered(data, scoped=False):
+    """(number, group, panes) in card order. On the main board, central comes
+    first as 0 and the rest count from 1."""
+    if scoped or not CENTRAL:
+        return [(n, g, ps) for n, (g, ps) in enumerate(data, 1)]
+    rest = [(g, ps) for g, ps in data if g["session_id"] != CENTRAL]
+    return ([(0, g, ps) for g, ps in data if g["session_id"] == CENTRAL]
+            + [(n, g, ps) for n, (g, ps) in enumerate(rest, 1)])
 
 
 def main_link():
@@ -535,7 +549,7 @@ def render(data, cols, tick=0, selected=None, scope_label=None, link_hot=False):
     the header carries a link to the main switchboard, accent-colored if link_hot."""
     cols = max(min(cols, 100), 36)
     counts = Counter(p["state"] for _, panes in data for p in panes if p["state"])
-    others = sum(1 for _, panes in data for p in panes if not p["state"])
+    others = sum(1 for _, panes in data for p in panes if not p["state"] and not is_board(p))
     pills = "  ".join(
         f"{COLORS[s]}{glyph(s, tick)} {counts[s]} {s}{RESET}" for s in ORDER if counts.get(s)
     )
@@ -555,7 +569,7 @@ def render(data, cols, tick=0, selected=None, scope_label=None, link_hot=False):
         lines = [head + " " * max(cols - width(head) - len(clock), 1) + right]
     lines += [pills or f"{MUTED}no agents{RESET}", ""]
     targets = [None, None, None]
-    for n, (session, panes) in enumerate(data, 1):
+    for n, session, panes in numbered(data, bool(scope_label)):
         more, hits = card(n, session, panes, cols, tick, selected, scoped=bool(scope_label))
         lines += more
         targets += hits
@@ -565,7 +579,7 @@ def render(data, cols, tick=0, selected=None, scope_label=None, link_hot=False):
 def footer(cols, status, scoped=False):
     group = "tab" if scoped else "session"
     keys = [("↑↓", "select"), ("⇥", group), ("⏎", "jump"), ("1-9", group), ("click", "jump"), ("q", "quit")]
-    if scoped:
+    if scoped or CENTRAL:
         keys.insert(-1, ("0", MAIN_LABEL))
     hint = "  ".join(f"{MUTED}{k}{RESET} {DIM}{v}{RESET}" for k, v in keys)
     for spare in ("click", "⇥", "↑↓"):   # a narrow pane: drop hints rather than wrap
@@ -632,8 +646,8 @@ class Board:
         """Number-key targets in card order."""
         with self.lock:
             if self.scope:
-                return [("tab", g["session_id"], g["window_id"], None) for g, _ in self.data]
-            return [("session", g["session_id"], None, None) for g, _ in self.data]
+                return {n: ("tab", g["session_id"], g["window_id"], None) for n, g, _ in numbered(self.data, True)}
+            return {n: ("session", g["session_id"], None, None) for n, g, _ in numbered(self.data)}
 
     def keep_selection(self):
         order = self.order()
@@ -670,6 +684,17 @@ class Board:
                 firsts.append((b, s))
         i = next((k for k, (_, s) in enumerate(firsts) if s == current), 0)
         self.selected = firsts[(i + step) % len(firsts)][0]
+
+    def home_tab(self, sid):
+        """The tab a session card opens: the operator's (the supervisor's for
+        central), else the one its switchboard sits in."""
+        with self.lock:
+            panes = next((ps for g, ps in self.data if g["session_id"] == sid), [])
+        for want in (lambda p: p["tab"] in ("operator", "supervisor"), is_board):
+            hit = next((p for p in panes if want(p)), None)
+            if hit:
+                return hit["window_id"]
+        return None
 
     def first_pane_of(self, group):
         return next((b for b, g in self.order() if g == group), None)
@@ -783,7 +808,7 @@ class Board:
             self.jump(sid, wid)
         else:
             self.selected = self.first_pane_of(sid) or self.selected
-            self.jump(sid)
+            self.jump(sid, self.home_tab(sid))
 
     # input
     def click(self, x, line, button, release):
@@ -835,14 +860,12 @@ class Board:
                     p = next((p for _, ps in self.data for p in ps if p["block_id"] == self.selected), None)
                 if p:
                     self.jump(p["session_id"], p["window_id"], p["block_id"])
-        elif k in ("0", "~"):
-            if self.scope:
-                self.jump_main()
-        elif k.isdigit():
-            groups = self.groups()
-            n = int(k) - 1
-            if n < len(groups):
-                self.activate(groups[n])
+        elif k in ("0", "~") and self.scope:
+            self.jump_main()
+        elif k.isdigit() or k == "~":
+            target = self.groups().get(0 if k == "~" else int(k))
+            if target:
+                self.activate(target)
         return True
 
 
@@ -1060,13 +1083,18 @@ def main():
     elif "--json" in args:
         print(json.dumps([{"group": g, "panes": panes} for g, panes in snapshot(scope)], indent=1))
     elif "--once" in args:
-        if scope:
-            hit = find_main()
-            if hit:
-                global MAIN_LABEL
-                MAIN_LABEL = hit[1]
+        global MAIN_LABEL, CENTRAL
+        hit = find_main()
+        if hit:
+            MAIN_LABEL = hit[1]
+            CENTRAL = None if scope else hit[0]
         print("\n".join(render(snapshot(scope), shutil.get_terminal_size().columns, scope_label=label)[0]))
     else:
+        if not scope:   # we are the main switchboard: our session is central
+            CENTRAL = tmux_here() or os.environ.get("REX_SESSION")
+            found = resolve(CENTRAL) if CENTRAL else None
+            if found:
+                MAIN_LABEL = found.get("label") or MAIN_LABEL
         # in tmux, mark this pane so others can find the main switchboard
         marked = MY_PANE and tmux("set-option", "-p", "-t", MY_PANE, "@cbar_role",
                                   "local" if scope else "main")[0] == 0

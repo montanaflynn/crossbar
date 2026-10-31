@@ -147,9 +147,34 @@ pub fn pick(data: &Snapshot, view: &View, exchanges: &[String]) -> Snapshot {
 
 type Lines = (Vec<Line<'static>>, Vec<Option<Target>>);
 
+/// The session a main board numbers 0: its exchange's own (the supervisor's).
+fn zero_label<'a>(view: &'a View, exchange: &'a str) -> Option<&'a str> {
+    match view {
+        View::Exchange(e) => Some(e),
+        View::All => Some(exchange),
+        View::Scoped(..) => None,
+    }
+}
+
+/// (number, card) in card order: on a main board the exchange's session
+/// comes first as 0 and the rest count from 1.
+pub fn numbered<'a>(data: &'a Snapshot, view: &View, exchange: &str) -> Vec<(usize, &'a (Group, Vec<Pane>))> {
+    let zero = zero_label(view, exchange);
+    let mut out: Vec<(usize, &(Group, Vec<Pane>))> = data.iter().filter(|(g, _)| Some(g.label.as_str()) == zero).map(|c| (0, c)).collect();
+    let rest = data.iter().filter(|(g, _)| Some(g.label.as_str()) != zero);
+    out.extend(rest.enumerate().map(|(n, c)| (n + 1, c)));
+    out
+}
+
+/// A switchboard pane: left off the cards.
+fn is_board(p: &Pane) -> bool {
+    p.state.is_empty() && (p.program == "switchboard" || p.label == "switchboard")
+}
+
 /// Lines for one card (a session, or scoped a tab), with a target per line.
+/// Switchboards are left off.
 fn card(number: usize, group: &Group, name: &str, panes: &[Pane], cols: usize, tick: usize, selected: Option<&str>, scoped: bool) -> Lines {
-    let mut panes = panes.to_vec();
+    let mut panes: Vec<Pane> = panes.iter().filter(|p| !is_board(p)).cloned().collect();
     panes.sort_by_key(|p| rank(&p.state));
     let top = panes.first().map(|p| p.state.as_str()).unwrap_or("");
     let edge = if ["blocked", "error", "done", "working"].contains(&top) { color(top).unwrap() } else { FAINT };
@@ -173,21 +198,22 @@ fn card(number: usize, group: &Group, name: &str, panes: &[Pane], cols: usize, t
         Target::Session(sid.clone())
     };
 
-    let num = if number <= 9 { format!("{number} ") } else { String::new() };
+    // ╭─ name tmux ~/path ──────── 2 ─╮
+    let num = if number <= 9 { format!(" {number} ") } else { String::new() };
     let tag = if group.mux == "tmux" && !scoped { " tmux" } else { "" };
-    let title_len = format!(" {num}{name}{tag} ").chars().count();
-    let path = fit(&home, inner.saturating_sub(title_len + 4));
-    let path_part = if path.is_empty() { String::new() } else { format!(" {path} ") };
-    let rule = "─".repeat((cols as isize - 3 - title_len as isize - path_part.chars().count() as isize - 1).max(1) as usize);
+    let title_len = format!(" {name}{tag} ").chars().count();
+    let path = fit(&home, inner.saturating_sub(title_len + num.chars().count() + 4));
+    let path_part = if path.is_empty() { String::new() } else { format!("{path} ") };
+    let rule = "─".repeat((cols as isize - 4 - title_len as isize - path_part.chars().count() as isize - num.chars().count() as isize).max(1) as usize);
     let mut lines = vec![Line::from(vec![
         s("╭─", edge),
         Span::raw(" "),
-        s(num.clone(), MUTED),
         Span::styled(name.to_string(), Style::default().fg(FG).add_modifier(Modifier::BOLD)),
         s(tag, DIM),
         Span::raw(" "),
-        s(rule, edge),
         s(path_part, MUTED),
+        s(rule, edge),
+        s(num, MUTED),
         s("─╮", edge),
     ])];
     let mut targets = vec![Some(head_target.clone())];
@@ -236,12 +262,11 @@ fn card(number: usize, group: &Group, name: &str, panes: &[Pane], cols: usize, t
             p.tab.clone()
         };
         let name = fit(&name, 16);
-        let board = !is_agent && p.program == "switchboard";
-        let mark = if is_agent { glyph(&p.state, tick) } else if board { "◇".into() } else { "▪".into() };
+        let mark = if is_agent { glyph(&p.state, tick) } else { "▪".into() };
         let word = if is_agent { p.state.clone() } else { p.program.clone() };
-        let right = if is_agent { p.since.clone() } else if board { "view".into() } else { "process".into() };
+        let right = if is_agent { p.since.clone() } else { "process".into() };
         let name_color = if is_agent || hot { FG } else { MUTED };
-        let mark_color = if is_agent { c } else if board { ACCENT } else { FAINT };
+        let mark_color = if is_agent { c } else { FAINT };
         let mut name_style = Style::default().fg(name_color);
         if hot {
             name_style = name_style.add_modifier(Modifier::BOLD);
@@ -296,6 +321,9 @@ pub fn render(data: &Snapshot, view: &View, cols: usize, tick: usize, selected: 
     let mut others = 0;
     for (_, panes) in data {
         for p in panes {
+            if is_board(p) {
+                continue;
+            }
             if p.state.is_empty() {
                 others += 1;
             } else {
@@ -353,21 +381,25 @@ pub fn render(data: &Snapshot, view: &View, cols: usize, tick: usize, selected: 
         lines.push(Line::from(Span::styled(what, Style::default().fg(MUTED).add_modifier(Modifier::ITALIC))));
         targets.push(None);
     }
-    for (n, (g, panes)) in data.iter().enumerate() {
-        let (l, t) = card(n + 1, g, &title(&g.label, view), panes, cols, tick, selected, scoped);
+    for (n, (g, panes)) in numbered(data, view, link) {
+        let (l, t) = card(n, g, &title(&g.label, view), panes, cols, tick, selected, scoped);
         lines.extend(l);
         targets.extend(t);
     }
     Frame { lines, targets }
 }
 
-fn footer(cols: usize, status: Option<&(Color, String)>, view: &View, link: &str) -> Line<'static> {
+/// The hint line; ZERO says the board has a card 0 (the exchange's session).
+fn footer(cols: usize, status: Option<&(Color, String)>, view: &View, link: &str, zero: bool) -> Line<'static> {
     let scoped = matches!(view, View::Scoped(..));
     let group = if scoped { "tab" } else { "session" };
     let mut keys: Vec<(&str, String)> =
         vec![("↑↓", "select".into()), ("⇥", group.into()), ("⏎", "jump".into()), ("1-9", group.into()), ("click", "jump".into()), ("q", "quit".into())];
+    if scoped || zero {
+        keys.insert(keys.len() - 1, ("0", link.to_string()));
+    }
     match view {
-        View::Scoped(..) => keys.insert(keys.len() - 1, ("0", link.to_string())),
+        View::Scoped(..) => {}
         View::Exchange(_) => keys.insert(keys.len() - 1, ("a", "all".into())),
         View::All => keys.insert(keys.len() - 1, ("a", link.to_string())),
     }
@@ -589,13 +621,27 @@ impl Board {
         out
     }
 
-    fn groups(&self, data: &Snapshot) -> Vec<Target> {
-        data.iter()
-            .map(|(g, _)| match &g.window_id {
-                Some(w) if self.scope().is_some() => Target::Tab(g.session_id.clone(), w.clone()),
-                _ => Target::Session(g.session_id.clone()),
+    /// Number-key targets: card number → what it opens.
+    fn groups(&self, data: &Snapshot) -> HashMap<usize, Target> {
+        numbered(data, &self.view, &self.exchange)
+            .into_iter()
+            .map(|(n, (g, _))| {
+                let t = match &g.window_id {
+                    Some(w) if self.scope().is_some() => Target::Tab(g.session_id.clone(), w.clone()),
+                    _ => Target::Session(g.session_id.clone()),
+                };
+                (n, t)
             })
             .collect()
+    }
+
+    /// The tab a session card opens: the operator's (the supervisor's for an
+    /// exchange), else the one its switchboard sits in.
+    fn home_tab(&self, sid: &str) -> Option<String> {
+        let sh = self.shared.lock().unwrap();
+        let panes = sh.data.iter().find(|(g, _)| g.session_id == sid).map(|(_, ps)| ps.clone()).unwrap_or_default();
+        let role = |p: &Pane| p.tab == crate::layout::OPERATOR || p.tab == crate::layout::SUPERVISOR;
+        panes.iter().find(|p| role(p)).or_else(|| panes.iter().find(|p| is_board(p))).map(|p| p.window_id.clone())
     }
 
     fn keep_selection(&mut self) {
@@ -734,7 +780,8 @@ impl Board {
             }
             Target::Session(sid) => {
                 self.selected = self.first_pane_of(&sid).or(self.selected.clone());
-                self.jump(sid, None, None);
+                let tab = self.home_tab(&sid);
+                self.jump(sid, tab, None);
             }
         }
     }
@@ -780,19 +827,15 @@ impl Board {
                     }
                 }
             }
-            KeyCode::Char('0') | KeyCode::Char('~') => {
-                if self.scope().is_some() {
-                    self.jump_main();
-                }
-            }
+            KeyCode::Char('0') | KeyCode::Char('~') if self.scope().is_some() => self.jump_main(),
             KeyCode::Char('a') => match &self.view {
                 View::Exchange(_) => self.view = View::All,
                 View::All => self.view = View::Exchange(self.exchange.clone()),
                 View::Scoped(..) => {}
             },
-            KeyCode::Char(c) if c.is_ascii_digit() => {
-                let n = c.to_digit(10).unwrap() as usize;
-                if let Some(t) = self.groups(data).get(n.wrapping_sub(1)).cloned() {
+            KeyCode::Char(c) if c.is_ascii_digit() || c == '~' => {
+                let n = c.to_digit(10).unwrap_or(0) as usize;
+                if let Some(t) = self.groups(data).get(&n).cloned() {
                     self.activate(t);
                 }
             }
@@ -920,7 +963,8 @@ fn live(mut board: Board) {
         }
         board.offset = board.offset.min(frame.lines.len().saturating_sub(rows));
         let view: Vec<Line> = frame.lines[board.offset..frame.lines.len().min(board.offset + rows)].to_vec();
-        let foot = footer(board.cols, status.as_ref(), &board.view, &link);
+        let zero = zero_label(&board.view, &board.exchange).is_some_and(|z| shown.iter().any(|(g, _)| g.label == z));
+        let foot = footer(board.cols, status.as_ref(), &board.view, &link, zero);
         let _ = term.draw(|f| {
             let area = f.area();
             let body = Rect { x: area.x + 1, y: area.y, width: area.width.saturating_sub(1), height: area.height.saturating_sub(1) };
@@ -1022,7 +1066,7 @@ pub fn main(args: Vec<String>) {
             View::Scoped(g.session_id.clone(), label)
         }
         // a 0.4 layout has no exchanges yet: show everything
-        None if has("--all") || home.needs_migrate() => View::All,
+        None if has("--all") || home.old_layout() => View::All,
         None => View::Exchange(exchange.clone()),
     };
     let exchanges: Vec<String> = home.exchanges().into_iter().map(|x| x.name).collect();
@@ -1141,13 +1185,14 @@ mod tests {
             kind: "".into(),
             msg: "all good".into(),
             since: "2m".into(),
+            since_at: String::new(),
         };
         let data = vec![(Group { session_id: "s".into(), label: "main/stats".into(), mux: "tmux".into(), window_id: None }, vec![p])];
         let f = render(&data, &View::Exchange("main".into()), 60, 0, None, "main", false);
         let text: Vec<String> = f.lines.iter().map(|l| l.spans.iter().map(|s| s.content.to_string()).collect()).collect();
         assert!(text[0].starts_with("◇ switchboard main · agents & panes by session"));
         assert_eq!(text[1], "✓ 1 done");
-        assert!(text[3].starts_with("╭─ 1 stats tmux ─"), "{}", text[3]);
+        assert!(text[3].starts_with("╭─ stats tmux ~/x ─") && text[3].ends_with("─ 1 ─╮"), "{}", text[3]);
         assert!(text[4].contains("✓ fix-x            done") && text[4].ends_with("2m │"), "{}", text[4]);
         assert!(text[5].contains("all good"));
         assert!(text.iter().all(|l| l.chars().count() == 60 || l.is_empty() || !l.starts_with(['╭', '│', '╰'])));

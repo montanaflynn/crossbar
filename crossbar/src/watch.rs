@@ -25,7 +25,7 @@ fn reports(look: &Looker, home: &Home, scope: &str, label: &str) -> HashMap<Stri
         }
     };
     // an exchange's session (or, in a 0.4 layout, `central`)
-    let exchange = home.exchange_exists(label) || (label == "central" && home.needs_migrate());
+    let exchange = home.exchange_exists(label) || (label == "central" && home.old_layout());
     if !exchange {
         for (_, panes) in look.snapshot(Some(scope)) {
             for p in &panes {

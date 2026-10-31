@@ -1022,7 +1022,7 @@ pub fn main(args: Vec<String>) {
             View::Scoped(g.session_id.clone(), label)
         }
         // a 0.4 layout has no exchanges yet: show everything
-        None if has("--all") || home.needs_migrate() => View::All,
+        None if has("--all") || home.old_layout() => View::All,
         None => View::Exchange(exchange.clone()),
     };
     let exchanges: Vec<String> = home.exchanges().into_iter().map(|x| x.name).collect();

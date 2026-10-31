@@ -8,7 +8,6 @@ pub mod board;
 pub mod cli;
 pub mod launch;
 pub mod layout;
-pub mod migrate;
 pub mod mux;
 pub mod paths;
 pub mod status;

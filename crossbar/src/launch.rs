@@ -151,11 +151,14 @@ fn account_shell() -> Option<String> {
     }
 }
 
-/// ARGV as one line for a person to read or paste (single-quoted as needed).
+/// ARGV as one line for a person to read or paste into sh or zsh: words
+/// they leave alone are shown bare; anything they'd expand (a leading `=` or
+/// `~`, globs, `$`, quotes, spaces) is single-quoted.
 pub fn show(argv: &[String]) -> String {
     argv.iter()
         .map(|a| {
-            if !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:@%+,".contains(c)) {
+            let plain = a.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:@%+,".contains(c));
+            if !a.is_empty() && plain && !a.starts_with('=') {
                 a.clone()
             } else {
                 format!("'{}'", a.replace('\'', r"'\''"))
@@ -163,5 +166,17 @@ pub fn show(argv: &[String]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shows_a_command_to_paste() {
+        let v = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(show(&v(&["tmux", "-L", "x", "attach-session", "-t", "=central/alpha"])), "tmux -L x attach-session -t '=central/alpha'");
+        assert_eq!(show(&v(&["a=b", "~/x", "it's", "*", "$HOME", "", "%3", "@1"])), r"a=b '~/x' 'it'\''s' '*' '$HOME' '' %3 @1");
+    }
 }
 

@@ -1,0 +1,63 @@
+#!/bin/sh
+# Stand-in for Claude Code in the parity sandbox: it never starts a real Claude.
+#
+#   claude agents --json     prints [] (the switchboards ask this in tmux)
+#   claude -n NAME [-w WT] [--append-system-prompt P] [PROMPT]
+#
+# It reports its state as Claude does, with OSC 7501 (Rex reads it; in tmux,
+# claude-relay turns it into pane options). The state comes from the brief the
+# prompt names ("Read BRIEF and do the task it describes."): its first line
+# `stub: STATE [KIND] [| MESSAGE]`. Without one it is idle. Then each line typed
+# into it makes it work for $CBAR_STUB_WORK seconds (default 2) and finish
+# done with "did: LINE"; a typed `/state STATE [KIND] [| MESSAGE]` sets that state.
+
+if [ "$1" = agents ]; then
+  echo '[]'
+  exit 0
+fi
+
+name= wt=- prompt=
+while [ $# -gt 0 ]; do
+  case $1 in
+    -n) name=$2; shift ;;
+    -w) wt=$2; shift ;;
+    --append-system-prompt) shift ;;
+    *) prompt=$1 ;;
+  esac
+  shift
+done
+brief=$(printf '%s\n' "$prompt" | sed -n 's/^Read \(.*\) and do the task it describes\.$/\1/p')
+
+# emit SPEC: report "STATE [KIND] [| MESSAGE]"
+emit() {
+  spec=$1 msg=
+  case $spec in *' | '*) msg=${spec#* | }; spec=${spec%% | *} ;; esac
+  set -- $spec
+  state=$1 kind=$2
+  out="state=$state:app=claude-code"
+  [ -n "$kind" ] && out="$out:kind=$kind"
+  [ -n "$msg" ] && out="$out:msg=$(printf '%s' "$msg" | base64 | tr -d '\n')"
+  printf '\033]7501;%s\033\\' "$out"
+}
+
+script=
+[ -n "$brief" ] && [ -f "$brief" ] && script=$(sed -n '1s/^stub: //p' "$brief")
+echo "stub claude: $name"
+echo "worktree: $wt"
+echo "brief: ${brief##*/}"
+echo "state: ${script:-idle}"
+emit "${script:-idle}"
+
+trap 'exit 0' HUP TERM INT
+while IFS= read -r line; do
+  echo "> $line"
+  case $line in
+    '/state '*) emit "${line#/state }" ;;
+    '') ;;
+    *)
+      emit working
+      sleep "${CBAR_STUB_WORK:-2}"
+      emit "done | did: $line"
+      ;;
+  esac
+done

@@ -1,0 +1,908 @@
+#!/usr/bin/env python3
+"""Run the 0.4 crossbar (zsh cbar + Python switchboard) and the Rust one side by
+side in a sandbox and diff what they print.
+
+  tests/parity/run [options] NEW_CHECKOUT
+
+NEW_CHECKOUT is a crossbar checkout with the Rust workspace; its cbar,
+switchboard and claude-relay are built with cargo (--no-build uses what's in
+its target/release). The old side is bin/cbar and bin/switchboard from --old
+(default: main) of this repo.
+
+  --old REF       the git ref of the old side (default main)
+  --rex           run in a private Rex server instead of a private tmux server
+  --only REGEX    run only the cases whose name matches
+  --accept NAME   take a case's current diff as intended (writes intended.md;
+                  repeatable, 'all' for every case that differs)
+  --keep          keep the sandbox (its path is printed) instead of removing it
+  --no-build      don't run cargo
+  -v              print the diffs too, not only the summary
+
+Each side gets its own sandbox: a scratch CROSSBAR_HOME under a scratch HOME,
+its own tmux server (tmux -L) or Rex server (a private socket), and a stub in
+place of claude (stub/claude) that reports the states its brief asks for. A
+tmux run puts a `rex` on PATH that always fails, so neither side sees the live
+Rex server. Everything a run starts is stopped when it ends, however it ends.
+
+intended.md lists the differences that are meant to be there: per case, why,
+and the diff it accepts (or "Any diff."). The summary says, per case:
+  pass      the same output
+  intended  differs exactly as intended.md says
+  DIFF      differs, and intended.md doesn't accept it
+  CHANGED   intended.md has an entry, but the diff isn't the accepted one
+The exit status is 1 if any case is DIFF or CHANGED.
+"""
+import argparse
+import base64
+import difflib
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+REPO = os.path.dirname(os.path.dirname(HERE))
+INTENDED = os.path.join(HERE, "intended.md")
+OUT = os.path.join(HERE, "out")   # the last run's outputs (gitignored)
+PROJECTS = {"alpha": "repo-a", "beta": "repo-b"}   # project: its folder under HOME
+AGENTS = {   # project: agent tabs started from fixtures/briefs, and the state each reports
+    "alpha": {"t-done": "done", "t-ask": "blocked", "t-boom": "error", "t-busy": "working", "t-chat": "idle"},
+    "beta": {"t-nogit": "done"},
+}
+VERBOSE = False
+
+
+def say(*a):
+    print(*a, file=sys.stderr, flush=True)
+
+
+# ---- sandbox ------------------------------------------------------------------
+
+class Cleanup:
+    """What a run started, stopped in reverse order whatever happens."""
+
+    def __init__(self):
+        self.steps = []
+
+    def add(self, what, fn):
+        self.steps.append((what, fn))
+
+    def run(self):
+        while self.steps:
+            what, fn = self.steps.pop()
+            try:
+                fn()
+            except Exception as e:   # keep going: the rest must still stop
+                say(f"parity: cleanup '{what}' failed: {e}")
+
+
+CLEANUP = Cleanup()
+
+
+def sh(argv, env=None, cwd=None, timeout=60, stdin=None, check=False):
+    p = subprocess.run(argv, env=env, cwd=cwd, timeout=timeout, capture_output=True, text=True,
+                       stdin=stdin if stdin is not None else subprocess.DEVNULL, start_new_session=True)
+    if check and p.returncode != 0:
+        raise RuntimeError(f"{' '.join(argv)}: exit {p.returncode}: {p.stderr.strip()}")
+    return p
+
+
+def git(*args, **kw):
+    return sh(["git", "-C", REPO, *args], **kw)
+
+
+class Sandbox:
+    """Files shared by both sides: the scratch HOME with the project folders,
+    an empty ZDOTDIR, the stubs."""
+
+    def __init__(self, root, rex):
+        self.root = root
+        self.home = os.path.join(root, "home")
+        self.zdot = os.path.join(root, "zdot")
+        self.stub = os.path.join(root, "stub")
+        self.out = os.path.join(root, "out")
+        self.rex = rex
+        for d in (self.home, self.zdot, self.stub, self.out):
+            os.makedirs(d)
+        for f in (".zshenv", ".zprofile", ".zshrc", ".zlogin"):
+            open(os.path.join(self.zdot, f), "w").close()
+        shutil.copy(os.path.join(HERE, "stub", "claude"), os.path.join(self.stub, "claude"))
+        # a real repo for alpha (agents get -w), a plain folder for beta
+        a = os.path.join(self.home, PROJECTS["alpha"])
+        os.makedirs(a)
+        g = ["git", "-C", a, "-c", "user.name=parity", "-c", "user.email=parity@example.invalid"]
+        sh(g[:3] + ["init", "-q", "-b", "main"], check=True)
+        sh(g + ["commit", "-q", "--allow-empty", "-m", "init"], check=True)
+        os.makedirs(os.path.join(self.home, PROJECTS["beta"]))
+
+    def short(self, path):
+        return "~" + path[len(self.home):] if path.startswith(self.home) else path
+
+
+def system_path():
+    """A PATH with tmux, git, python3 and zsh and none of the user's own bin
+    folders (where a real claude lives)."""
+    dirs = []
+    for prog in ("tmux", "git", "python3", "zsh", "base64"):
+        found = shutil.which(prog)
+        if not found:
+            sys.exit(f"parity: needs {prog}")
+        d = os.path.dirname(found)
+        if d not in dirs and not d.startswith(os.path.expanduser("~")):
+            dirs.append(d)
+    for d in ("/usr/bin", "/bin", "/usr/sbin", "/sbin"):
+        if d not in dirs:
+            dirs.append(d)
+    return ":".join(dirs)
+
+
+# ---- the two sides -------------------------------------------------------------
+
+class Side:
+    def __init__(self, name, box, bin_dir, cb_home, rex):
+        self.name = name   # old or new
+        self.box = box
+        self.bin = bin_dir
+        self.cb = cb_home
+        self.rex = rex
+        self.sock = f"cbpar-{name}-{os.getpid()}"   # tmux -L
+        self.rex_sock = os.path.join(box.root, f"rex-{name}.sock")
+        self.stub = os.path.join(box.root, f"stub-{name}")   # PATH's first folder: claude and rex
+        os.makedirs(self.stub)
+        os.symlink(os.path.join(box.stub, "claude"), os.path.join(self.stub, "claude"))
+        if rex:
+            real = shutil.which("rex")
+            if not real:
+                sys.exit("parity: --rex needs rex")
+            # rex ignores $REX_SERVER: every call names the private server, and never starts one
+            with open(os.path.join(self.stub, "rex"), "w") as f:
+                f.write(f'#!/bin/sh\nexec "{real}" --autostart=false -S "unix://{self.rex_sock}" "$@"\n')
+            os.chmod(os.path.join(self.stub, "rex"), 0o755)
+        else:
+            shutil.copy(os.path.join(HERE, "stub", "rex-off"), os.path.join(self.stub, "rex"))
+        self.env = {
+            "HOME": box.home,
+            "ZDOTDIR": box.zdot,
+            "SHELL": "/bin/sh",
+            "PATH": f"{self.stub}:{self.bin}:{system_path()}",
+            "USER": os.environ.get("USER", ""),
+            "LOGNAME": os.environ.get("LOGNAME", ""),
+            "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+            "TERM": "xterm-256color",
+            "LANG": "en_US.UTF-8",
+            "LC_ALL": "en_US.UTF-8",
+            "COLUMNS": "100",
+            "LINES": "50",
+            "CROSSBAR_HOME": cb_home,
+            "CROSSBAR_TMUX_SOCKET": self.sock,
+            "CROSSBAR_CLAUDE": os.path.join(self.stub, "claude"),
+            "CLAUDE_RELAY_PROGRAM": os.path.join(self.stub, "claude"),
+            "CBAR_STUB_WORK": "2",
+        }
+        self.mux = Rex(self) if rex else Tmux(self)
+        self.panes_at = {}   # project or "central": (session id, its operator's/supervisor's pane)
+
+    # names of things on this side
+    def session(self, project=None):
+        if self.name == "old":
+            return project or "central"
+        return f"main/{project}" if project else "main"
+
+    def briefs(self, project):
+        if self.name == "old":
+            return os.path.join(self.cb, "projects", project, "briefs")
+        return os.path.join(self.cb, "exchanges", "main", "projects", project, "briefs")
+
+    def run(self, argv, pane=None, timeout=60, stdin=None):
+        env = dict(self.env)
+        if pane:
+            env.update(self.mux.pane_env(*self.panes_at[pane]))
+        argv = [os.path.join(self.bin, argv[0]) if argv[0] in ("cbar", "switchboard") else argv[0], *argv[1:]]
+        try:
+            p = sh(argv, env=env, cwd=self.box.home, timeout=timeout, stdin=stdin)
+            return p.returncode, p.stdout, p.stderr
+        except subprocess.TimeoutExpired as e:
+            out = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
+            err = e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
+            return "timeout", out, err
+
+
+class Tmux:
+    def __init__(self, side):
+        self.side = side
+
+    def __call__(self, *args, check=False):
+        return sh(["tmux", "-L", self.side.sock, *args], env=self.side.env, check=check)
+
+    def start(self):
+        CLEANUP.add(f"tmux server {self.side.sock}", self.stop)
+
+    def stop(self):
+        self("kill-server")
+
+    def pane_env(self, sid, pane):
+        return {"TMUX_PANE": pane, "TMUX": f"/private/tmp/tmux-{os.getuid()}/{self.side.sock},0,0"}
+
+    def panes(self):
+        """[{session, sid, tab, pane, label, state, msg}] for every pane."""
+        fields = ["session_name", "session_id", "window_name", "pane_id", "@cbar_label", "@cbar_state", "@cbar_msg"]
+        p = self("list-panes", "-a", "-F", "\t".join("#{%s}" % f for f in fields))
+        out = []
+        for line in p.stdout.splitlines():
+            r = line.split("\t")
+            if len(r) == len(fields):
+                out.append({"session": r[0], "sid": r[1], "tab": r[2], "pane": r[3], "label": r[4],
+                            "state": r[5], "msg": decode(r[6])})
+        return out
+
+    def new_session(self, name, tab, cwd, argv):
+        p = self("new-session", "-d", "-s", name, "-n", tab, "-c", cwd, "-x", "200", "-y", "50",
+                 "-P", "-F", "#{pane_id}", *argv, check=True)
+        return p.stdout.strip()
+
+    def split(self, name, pane, cwd, argv, label):
+        p = self("split-window", "-h", "-d", "-l", "30%", "-t", pane, "-c", cwd, "-P", "-F", "#{pane_id}",
+                 *argv, check=True)
+        board = p.stdout.strip()
+        self("set-option", "-p", "-t", board, "@cbar_label", label)
+        return board
+
+    def send_line(self, sid, pane, text):
+        self("send-keys", "-t", pane, "-l", "--", text)
+        time.sleep(0.4)
+        self("send-keys", "-t", pane, "Enter")
+
+
+class Rex:
+    def __init__(self, side):
+        self.side = side
+        self.server = None
+
+    def __call__(self, *args, check=False):
+        return sh(["rex", *args], env=self.side.env, check=check)
+
+    def json(self, *args):
+        p = self(*args)
+        try:
+            return json.loads(p.stdout) if p.returncode == 0 and p.stdout.strip() else {}
+        except json.JSONDecodeError:
+            return {}
+
+    def start(self):
+        real = shutil.which("rex")
+        state = os.path.join(self.side.box.root, f"rex-state-{self.side.name}")
+        config = os.path.join(self.side.box.root, "rex-init.lua")
+        open(config, "w").close()
+        log = open(os.path.join(self.side.box.root, f"rex-{self.side.name}.log"), "w")
+        self.server = subprocess.Popen(
+            [real, "--autostart=false", "server", "run", "--listen", f"unix://{self.side.rex_sock}",
+             "--state-dir", state, "--restore=false", "--config", config],
+            env=self.side.env, stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
+        CLEANUP.add(f"rex server {self.side.rex_sock}", self.stop)
+        for _ in range(50):
+            if self("ls", "--json").returncode == 0:
+                break
+            time.sleep(0.2)
+        else:
+            raise RuntimeError(f"the private Rex server didn't start (see {log.name})")
+        self.check_shell()
+
+    def check_shell(self):
+        """A Rex pane starts your login shell; make sure claude and rex in it
+        are the sandbox's, or stop before anything types `claude` into one."""
+        probe = os.path.join(self.side.box.root, f"probe-{self.side.name}")
+        self("new", "_probe", "-c", self.side.box.home, "--json", check=True)
+        time.sleep(1)
+        self("send", "-s", "_probe", f"command -v claude rex > {probe}; echo $ZDOTDIR >> {probe}\r")
+        for _ in range(50):
+            if os.path.exists(probe) and len(open(probe).read().splitlines()) >= 3:
+                break
+            time.sleep(0.2)
+        sid = self.session_id("_probe")
+        if sid:
+            self("kill", sid)
+        found = open(probe).read().split() if os.path.exists(probe) else []
+        want = [os.path.join(self.side.stub, "claude"), os.path.join(self.side.stub, "rex")]
+        if found[:2] != want:
+            raise RuntimeError(f"a Rex pane's shell finds {found[:2] or 'nothing'}, not the sandbox's "
+                               f"claude and rex; not running Rex cases (is your login shell zsh?)")
+
+    def stop(self):
+        if self.server and self.server.poll() is None:
+            os.killpg(self.server.pid, signal.SIGTERM)
+            try:
+                self.server.wait(10)
+            except subprocess.TimeoutExpired:
+                os.killpg(self.server.pid, signal.SIGKILL)
+
+    def session_id(self, name):
+        for s in self.json("ls", "--json").get("sessions", []):
+            if s.get("label") == name:
+                return s["session_id"]
+        return None
+
+    def pane_env(self, sid, pane):
+        return {"REX_SESSION": sid, "REX_BLOCK": pane}
+
+    def panes(self):
+        out = []
+        for s in self.json("ls", "--json").get("sessions", []):
+            sid = s["session_id"]
+            tabs = {w["window_id"]: w.get("label", "") for w in self.json("window", "ls", "-s", sid, "--json").get("windows", [])}
+            for b in self.json("block", "ls", "-s", sid, "--json").get("blocks", []):
+                if b.get("placement", "placed") != "placed":
+                    continue
+                recs = self.json("block", "call", "-s", sid, "-b", b["block_id"], "program_status").get("records") or []
+                root = next((r for r in recs if not r.get("id")), {})
+                out.append({"session": s.get("label", ""), "sid": sid, "tab": tabs.get(b.get("window_id"), ""),
+                            "pane": b["block_id"], "label": b.get("label", ""), "state": root.get("state", ""),
+                            "msg": root.get("msg", "")})
+        return out
+
+    def new_session(self, name, tab, cwd, argv):
+        v = json.loads(self("new", name, "-c", cwd, "--window", tab, "--json", "--", *argv, check=True).stdout)
+        return v["initial_windows"][0]["block_ids"][0]
+
+    def split(self, name, pane, cwd, argv, label):
+        v = json.loads(self("split", "-s", name, "-b", pane, "-c", cwd, "--split=right", "--ratio", "30",
+                            "--focus=false", "--label", label, "--json", "--", *argv, check=True).stdout)
+        return v["block_ids"][0]
+
+    def send_line(self, sid, pane, text):
+        self("send", "-s", sid, "-b", pane, text)
+        time.sleep(0.4)
+        self("send", "-s", sid, "-b", pane, "\r")
+
+
+def decode(v):
+    if not v:
+        return ""
+    try:
+        return base64.b64decode(v + "=" * (-len(v) % 4), validate=True).decode()
+    except ValueError:
+        return v
+
+
+# ---- building each side ---------------------------------------------------------
+
+def build_old(box, ref, rex):
+    bin_dir = os.path.join(box.root, "old", "bin")
+    os.makedirs(bin_dir)
+    for f in ("cbar", "switchboard"):
+        p = git("show", f"{ref}:bin/{f}", check=True)
+        path = os.path.join(bin_dir, f)
+        with open(path, "w") as out:
+            out.write(p.stdout)
+        os.chmod(path, 0o755)
+    cb = os.path.join(box.home, ".crossbar-old")
+    os.makedirs(os.path.join(cb, "projects"))
+    with open(os.path.join(cb, "operator.md"), "w") as out:
+        out.write(git("show", f"{ref}:operator.md", check=True).stdout)
+    return Side("old", box, bin_dir, cb, rex)
+
+
+def build_new(box, checkout, build, rex):
+    if not os.path.isfile(os.path.join(checkout, "crossbar", "Cargo.toml")):
+        sys.exit(f"parity: {checkout} has no crossbar/Cargo.toml (not a 0.5 checkout)")
+    if build:
+        say(f"parity: building {checkout} (cargo build --release)")
+        p = subprocess.run(["cargo", "build", "--release", "--workspace", "-q"], cwd=checkout)
+        if p.returncode != 0:
+            sys.exit("parity: cargo build failed")
+    target = os.path.join(checkout, "target", "release")
+    bin_dir = os.path.join(box.root, "new", "bin")
+    os.makedirs(bin_dir)
+    for f in ("cbar", "switchboard", "claude-relay"):
+        src = os.path.join(target, f)
+        if not os.path.isfile(src):
+            sys.exit(f"parity: no {src} (build it, or drop --no-build)")
+        shutil.copy2(src, os.path.join(bin_dir, f))
+    cb = os.path.join(box.home, ".crossbar-new")
+    os.makedirs(cb)
+    return Side("new", box, bin_dir, cb, rex)
+
+
+# ---- setting up a side's world ----------------------------------------------------
+
+SETUP = {}   # case name: (side: (code, out, err)), from setup steps compared as cases
+
+
+def setup(side):
+    """Central/the exchange with its supervisor and main board, projects alpha
+    and beta with operators and local boards, and the agents in AGENTS."""
+    s, box = side, side.box
+    s.mux.start()
+    term = "--rex" if s.rex else "--tmux"
+    if s.name == "old":
+        # 0.4 had no `cbar up`: central was built by hand, as the live one was
+        sup = s.mux.new_session("central", "supervisor", box.home,
+                                [os.path.join(s.bin, "claude-relay"), "-n", "supervisor"])
+        s.mux.split("central", sup, box.home, [os.path.join(s.bin, "switchboard")], "switchboard")
+    else:
+        record("new-exchange", s, s.run(["cbar", "new", "--exchange", "main", term]))
+    for project, folder in PROJECTS.items():
+        record(f"new-project-{project}", s, s.run(["cbar", "new", project, os.path.join(box.home, folder), term]))
+    want = {(s.session(), "supervisor"): "idle"}
+    want.update({(s.session(p), "operator"): "idle" for p in PROJECTS})
+    wait_states(s, want)
+    locate(s)
+    for project, agents in AGENTS.items():
+        os.makedirs(s.briefs(project), exist_ok=True)
+        for task in agents:
+            shutil.copy(os.path.join(HERE, "fixtures", "briefs", f"{task}.md"), s.briefs(project))
+            if project in s.panes_at:
+                record(f"agent-new-{task}", s, s.run(["cbar", "agent", "new", task], pane=project))
+            want[(s.session(project), task)] = agents[task]
+    wait_states(s, want)
+
+
+def record(name, side, result):
+    SETUP.setdefault(name, {})[side.name] = result
+
+
+def locate(side):
+    """The supervisor's and each operator's pane, for commands run 'in' them."""
+    for p in side.mux.panes():
+        for project in [None, *PROJECTS]:
+            tab = "operator" if project else "supervisor"
+            if p["session"] == side.session(project) and p["tab"] == tab and p["label"] != "switchboard":
+                side.panes_at.setdefault(project or "central", (p["sid"], p["pane"]))
+
+
+def wait_states(side, want, limit=30):
+    """Wait until each (session, tab) in WANT reports its state."""
+    end = time.time() + limit
+    while True:
+        have = {(p["session"], p["tab"]): p["state"] for p in side.mux.panes() if p["label"] != "switchboard"}
+        missing = {k: v for k, v in want.items() if have.get(k) != v}
+        if not missing or time.time() > end:
+            break
+        time.sleep(0.5)
+    for (session, tab), state in missing.items():
+        say(f"parity: {side.name}: {session} {tab} is '{have.get((session, tab), 'missing')}', not {state}")
+    return not missing
+
+
+# ---- cases -------------------------------------------------------------------------
+
+class Case:
+    """OLD and NEW are argvs ('cbar …', 'switchboard …'); NEW defaults to OLD.
+    PANE runs them as if typed in that project's operator pane (or 'central':
+    the supervisor's). KIND says how output is compared: text, color (styles
+    kept) or json. BEFORE/AFTER are hooks run on a side around the command."""
+
+    def __init__(self, name, old, new=None, pane=None, kind="text", stdin=None, timeout=60, run=None):
+        self.name, self.old, self.new = name, old, new or old
+        self.pane, self.kind, self.stdin, self.timeout, self.runner = pane, kind, stdin, timeout, run
+
+    def argv(self, side):
+        return self.old if side.name == "old" else self.new
+
+    def execute(self, side):
+        if self.runner:
+            return self.runner(self, side)
+        return side.run(self.argv(side), pane=self.pane, timeout=self.timeout, stdin=self.stdin)
+
+
+def watch_case(case, side):
+    """cbar watch in alpha's operator pane, while t-chat is sent a line and
+    t-done is closed."""
+    env = dict(side.env)
+    env.update(side.mux.pane_env(*side.panes_at["alpha"]))
+    log = os.path.join(side.box.root, f"watch-{side.name}.out")
+    with open(log, "w") as out, open(log + ".err", "w") as err:
+        p = subprocess.Popen([os.path.join(side.bin, "cbar"), "watch"], env=env, cwd=side.box.home,
+                             stdout=out, stderr=err, stdin=subprocess.DEVNULL, start_new_session=True)
+    CLEANUP.add(f"{side.name} watch", lambda: p.poll() is None and os.killpg(p.pid, signal.SIGKILL))
+    time.sleep(6)
+    chat = next((x for x in side.mux.panes() if x["session"] == side.session("alpha") and x["tab"] == "t-chat"), None)
+    if chat:
+        side.mux.send_line(chat["sid"], chat["pane"], "ping")
+    time.sleep(10)
+    record("watch-close-t-done", side, side.run(["cbar", "agent", "close", "t-done"], pane="alpha"))
+    time.sleep(10)
+    if p.poll() is None:
+        os.killpg(p.pid, signal.SIGTERM)
+    code = p.wait(10)
+    return ("watch ran" if code in (-signal.SIGTERM, 0, 143) else code), open(log).read(), open(log + ".err").read()
+
+
+def path_new_case(case, side):
+    """An agent started by its path with a brief to copy (new), against `agent new` (old)."""
+    brief = os.path.join(HERE, "fixtures", "briefs", "t-path.md")
+    if side.name == "old":
+        shutil.copy(brief, side.briefs("alpha"))
+        return side.run(["cbar", "agent", "new", "t-path"], pane="alpha")
+    return side.run(["cbar", "new", "alpha/t-path", brief])
+
+
+def setup_case(case, side):
+    return SETUP.get(case.name, {}).get(side.name, ("not run", "", ""))
+
+
+def cases():
+    alpha = ["--session", "alpha"]
+    C = Case
+    return [
+        # what setup printed
+        *[C(f"new-project-{p}", None, run=setup_case) for p in PROJECTS],
+        *[C(f"agent-new-{t}", None, run=setup_case) for ts in AGENTS.values() for t in ts],
+        # read-only
+        C("help", ["cbar", "help"]),
+        C("help-agent", ["cbar", "agent", "help"]),
+        C("version", ["cbar", "version"]),
+        C("ls", ["cbar", "ls"]),
+        C("board-main-once", ["switchboard", "--once"]),
+        C("board-main-once-color", ["switchboard", "--once"], kind="color"),
+        C("board-main-json", ["switchboard", "--json"], kind="json"),
+        C("board-central-once", ["switchboard", "--once", "--session", "central"], ["switchboard", "--once", "--session", "main"]),
+        C("board-local-once", ["switchboard", "--once", *alpha], ["switchboard", "--once", "--session", "main/alpha"]),
+        C("board-local-once-color", ["switchboard", "--once", *alpha], ["switchboard", "--once", "--session", "main/alpha"], kind="color"),
+        C("board-local-json", ["switchboard", "--json", *alpha], ["switchboard", "--json", "--session", "main/alpha"], kind="json"),
+        C("board-here-once", ["cbar", "board", "--here", "--once"], pane="alpha"),
+        C("board-here-json", ["cbar", "board", "--here", "--json"], pane="alpha", kind="json"),
+        C("agent-ls", ["cbar", "agent", "ls"], pane="alpha"),
+        C("agent-status-done", ["cbar", "agent", "status", "t-done"], pane="alpha"),
+        C("agent-status-ask", ["cbar", "agent", "status", "t-ask"], pane="alpha"),
+        C("agent-status-boom", ["cbar", "agent", "status", "t-boom"], pane="alpha"),
+        C("path-status-done", ["cbar", "agent", "status", "t-done"], ["cbar", "status", "alpha/t-done"], pane="alpha"),
+        C("agent-tail-done", ["cbar", "agent", "tail", "t-done", "4"], pane="alpha"),
+        C("agent-tail-nogit", ["cbar", "agent", "tail", "t-nogit", "4"], pane="beta"),
+        C("path-tail-done", ["cbar", "agent", "tail", "t-done", "4"], ["cbar", "tail", "alpha/t-done", "4"], pane="alpha"),
+        C("open-dry", ["cbar", "open", "-n", "alpha"]),
+        # errors and exit codes
+        C("err-unknown-command", ["cbar", "frob"]),
+        C("err-agent-unknown", ["cbar", "agent", "frob"], pane="alpha"),
+        C("err-agent-outside", ["cbar", "agent", "ls"]),
+        C("err-new-usage", ["cbar", "new"]),
+        C("err-new-nodir", ["cbar", "new", "gamma", "/nonexistent/parity", "--tmux"]),
+        C("err-new-option", ["cbar", "new", "gamma", "--frob"]),
+        C("err-agent-new-nobrief", ["cbar", "agent", "new", "t-nobrief"], pane="alpha"),
+        C("err-agent-new-badname", ["cbar", "agent", "new", "bad name"], pane="alpha"),
+        C("err-agent-new-exists", ["cbar", "agent", "new", "t-done"], pane="alpha"),
+        C("err-agent-status-none", ["cbar", "agent", "status", "nope"], pane="alpha"),
+        C("err-agent-send-usage", ["cbar", "agent", "send", "t-chat"], pane="alpha"),
+        C("err-send-busy", ["cbar", "agent", "send", "t-busy", "hello"], pane="alpha"),
+        C("err-send-blocked", ["cbar", "agent", "send", "t-ask", "yes"], pane="alpha"),
+        C("err-close-busy", ["cbar", "agent", "close", "t-busy"], pane="alpha"),
+        C("err-close-blocked", ["cbar", "agent", "close", "t-ask"], pane="alpha"),
+        C("err-close-self", ["cbar", "agent", "close", "operator"], pane="alpha"),
+        C("err-rm-none", ["cbar", "rm", "-y", "nope"]),
+        C("err-rm-notty", ["cbar", "rm", "beta"]),
+        C("err-open-none", ["cbar", "open", "-n", "nope"]),
+        C("err-board-nosession", ["switchboard", "--once", "--session", "nope"]),
+        C("err-board-watch", ["switchboard", "--watch"]),
+        C("wait-busy", ["cbar", "agent", "wait", "t-busy", "3"], pane="alpha"),
+        # these change things, in this order
+        C("path-new-agent", None, run=path_new_case),
+        C("new-project-again", ["cbar", "new", "alpha", "{home}/repo-a", "{term}"]),
+        C("send-chat", ["cbar", "agent", "send", "t-chat", "hello"], pane="alpha"),
+        C("wait-chat", ["cbar", "agent", "wait", "t-chat", "30"], pane="alpha"),
+        C("tail-chat", ["cbar", "agent", "tail", "t-chat", "8"], pane="alpha"),
+        C("path-send-chat", ["cbar", "agent", "send", "t-chat", "again"], ["cbar", "send", "alpha/t-chat", "again"]),
+        C("path-wait-chat", ["cbar", "agent", "wait", "t-chat", "30"], ["cbar", "wait", "alpha/t-chat", "30"], pane="alpha"),
+        C("watch", None, run=watch_case, timeout=120),
+        C("watch-close-t-done", None, run=setup_case),
+        C("close-boom", ["cbar", "agent", "close", "-f", "t-boom"], pane="alpha"),
+        C("rm-project", ["cbar", "rm", "-y", "beta"]),
+        C("ls-after-rm", ["cbar", "ls"]),
+    ]
+
+
+# ---- normalizing -------------------------------------------------------------------
+
+ANSI = re.compile(r"\x1b\[([0-9;]*)m")
+OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+STRIP_RULES = {   # rule: (side it applies to, pattern removed from stderr) — intended.md lists these
+    "deprecation-note": ("new", re.compile(r"^cbar: `[^`]*` is deprecated; use `[^`]*`\n?", re.M)),
+}
+
+
+def styled(text):
+    """TEXT with its SGR colors as [fg=#rrggbb b i] … [/] runs, whatever
+    sequences produced them (spaces only carry a background)."""
+    out_lines = []
+    style = {}
+    for line in text.split("\n"):
+        runs, pos = [], 0
+        for m in list(ANSI.finditer(line)) + [None]:
+            chunk = line[pos:m.start()] if m else line[pos:]
+            for ch in chunk:
+                key = tuple(sorted((k, v) for k, v in style.items() if ch != " " or k == "bg"))
+                if runs and runs[-1][0] == key:
+                    runs[-1][1] += ch
+                else:
+                    runs.append([key, ch])
+            if not m:
+                break
+            pos = m.end()
+            sgr(style, m.group(1))
+        out_lines.append("".join(f"[{' '.join(f'{k}={v}' if v is not True else k for k, v in key)}]{s}[/]"
+                                 if key else s for key, s in runs))
+    return "\n".join(out_lines)
+
+
+def sgr(style, params):
+    ps = [int(x) if x.isdigit() else 0 for x in (params or "0").split(";")]
+    i = 0
+    while i < len(ps):
+        p = ps[i]
+        if p == 0:
+            style.clear()
+        elif p in (1, 2, 3, 4):
+            style[{1: "b", 2: "dim", 3: "i", 4: "u"}[p]] = True
+        elif p == 22:
+            style.pop("b", None); style.pop("dim", None)
+        elif p in (23, 24):
+            style.pop({23: "i", 24: "u"}[p], None)
+        elif p in (38, 48) and i + 4 < len(ps) and ps[i + 1] == 2:
+            style["fg" if p == 38 else "bg"] = "#%02x%02x%02x" % tuple(ps[i + 2:i + 5])
+            i += 4
+        elif p in (38, 48) and i + 2 < len(ps) and ps[i + 1] == 5:
+            style["fg" if p == 38 else "bg"] = f"c{ps[i + 2]}"
+            i += 2
+        elif p in (39, 49):
+            style.pop("fg" if p == 39 else "bg", None)
+        elif 30 <= p <= 37 or 90 <= p <= 97:
+            style["fg"] = f"c{p}"
+        elif 40 <= p <= 47 or 100 <= p <= 107:
+            style["bg"] = f"c{p}"
+        i += 1
+
+
+def names(side, text):
+    """The exchange naming: 0.4's `central` is 0.5's `main`, project `alpha`'s
+    session is `main/alpha`. Applied to the old side."""
+    if side.name != "old":
+        return text
+    text = re.sub(r"\bcentral\b", "main", text)
+    ps = "|".join(PROJECTS)
+    text = re.sub(rf"(session '|\"label\": \"|=)({ps})\b", r"\1main/\2", text)
+    text = text.replace("~/.crossbar/projects/", "~/.crossbar/exchanges/main/projects/")
+    return text
+
+
+def common(side, text):
+    box = side.box
+    text = OSC.sub("", text)
+    for path, to in ((side.cb, "~/.crossbar"), (side.bin, "$BIN"), (side.stub, "$STUB"), (box.home, "~"),
+                     (box.root, "$SANDBOX")):
+        text = text.replace(path, to).replace(os.path.realpath(path), to)
+    text = text.replace(box.short(side.cb), "~/.crossbar")
+    text = text.replace(side.sock, "$SOCK")
+    text = re.sub(r"\b\d\d:\d\d\b", "HH:MM", text)
+    text = re.sub(r"(?<![\w.])%\d+\b", "%N", text)
+    text = re.sub(r"(?<![\w.])@\d+\b", "@N", text)
+    text = re.sub(r"(?<![\w.])\$\d+\b", "$N", text)
+    text = re.sub(r"\b(session|window|block|client):[0-9a-f-]{36}\b", r"\1:ID", text)
+    return names(side, text)
+
+
+def canon_json(text):
+    """Groups by label, panes by tab and label, keys sorted, ids and ages
+    replaced; None if TEXT isn't JSON."""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(data, list):
+        for g in data:
+            if isinstance(g, dict):
+                for p in g.get("panes", []):
+                    if isinstance(p, dict) and p.get("since"):
+                        p["since"] = "<age>"
+                g.get("panes", []).sort(key=lambda p: (p.get("tab", ""), p.get("label", ""), p.get("program", "")))
+        data.sort(key=lambda g: (g.get("group", {}) or {}).get("label", "") if isinstance(g, dict) else "")
+    return json.dumps(data, indent=1, sort_keys=True, ensure_ascii=False)
+
+
+def normalize(case, side, result):
+    code, out, err = result
+    fired = []
+    for rule, (who, pat) in STRIP_RULES.items():
+        if who == side.name and pat.search(err):
+            err = pat.sub("", err)
+            fired.append(rule)
+    if case.kind == "color":
+        out = styled(out)
+    else:
+        out = ANSI.sub("", out)
+    out, err = common(side, out), common(side, ANSI.sub("", err))
+    if case.kind == "json":
+        out = canon_json(out) or out
+    text = out.rstrip("\n") + "\n"
+    if err.strip():
+        text += "--- stderr\n" + err.rstrip("\n") + "\n"
+    text += f"--- exit {code}\n"
+    return text, fired
+
+
+# ---- intended differences ------------------------------------------------------------
+
+def read_intended():
+    """{case: {"why": str, "diff": str or None (any diff)}} and the file's text."""
+    if not os.path.exists(INTENDED):
+        return {}, ""
+    text = open(INTENDED).read()
+    out = {}
+    for block in re.split(r"^## ", text, flags=re.M)[1:]:
+        name, _, body = block.partition("\n")
+        name = name.strip()
+        if name.startswith("Normalization"):
+            continue
+        m = re.search(r"^```diff\n(.*?)^```", body, re.S | re.M)
+        why = re.sub(r"^```diff\n.*?^```\n?", "", body, flags=re.S | re.M).strip()
+        out[name] = {"why": why, "diff": m.group(1) if m else None}
+    return out, text
+
+
+def write_intended(entries, accept):
+    _, text = read_intended()
+    head = text.split("\n## ", 1)[0] if text else "# Intended differences\n"
+    rules = re.search(r"^## Normalization.*?(?=^## |\Z)", text, re.S | re.M)
+    parts = [head.rstrip("\n") + "\n"]
+    if rules:
+        parts.append(rules.group(0).rstrip("\n") + "\n")
+    for name in sorted(set(entries) | set(accept)):
+        e = entries.get(name, {"why": "TODO: why this difference is intended.", "diff": None})
+        diff = accept.get(name, e["diff"])
+        body = f"## {name}\n\n{e['why']}\n"
+        body += f"\n```diff\n{diff}```\n" if diff is not None else ""
+        parts.append(body)
+    with open(INTENDED, "w") as f:
+        f.write("\n".join(parts))
+
+
+# ---- main --------------------------------------------------------------------------
+
+def main():
+    global VERBOSE
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("checkout", nargs="?")
+    ap.add_argument("--old", default="main")
+    ap.add_argument("--rex", action="store_true")
+    ap.add_argument("--only")
+    ap.add_argument("--accept", action="append", default=[])
+    ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--no-build", action="store_true")
+    ap.add_argument("-v", action="store_true")
+    ap.add_argument("-h", "--help", action="store_true")
+    a = ap.parse_args()
+    if a.help or not a.checkout:
+        print(__doc__.strip())
+        sys.exit(0 if a.help else 2)
+    VERBOSE = a.v
+    checkout = os.path.realpath(a.checkout)
+
+    def stop(sig, _):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGHUP, stop)
+
+    root = os.path.realpath(tempfile.mkdtemp(prefix="cbpar-", dir="/tmp"))   # short: Rex sockets live here
+    CLEANUP.add("sandbox", lambda: None if a.keep else shutil.rmtree(root, ignore_errors=True))
+    CLEANUP.add("leftover processes", lambda: reap(root))
+    try:
+        return run(a, checkout, root)
+    except KeyboardInterrupt:
+        say("parity: interrupted")
+        return 130
+    finally:
+        CLEANUP.run()
+        if a.keep:
+            say(f"parity: kept the sandbox at {root}")
+
+
+def reap(root):
+    """Kill anything still running from the sandbox (its path in the command line)."""
+    p = sh(["pgrep", "-f", root])
+    pids = [int(x) for x in p.stdout.split() if x.isdigit() and int(x) != os.getpid()]
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    if pids:
+        say(f"parity: killed {len(pids)} leftover process(es)")
+
+
+def run(a, checkout, root):
+    box = Sandbox(root, a.rex)
+    old = build_old(box, a.old, a.rex)
+    new = build_new(box, checkout, not a.no_build, a.rex)
+    todo = [c for c in cases() if not a.only or re.search(a.only, c.name)]
+    results = {}
+    for side in (old, new):
+        say(f"parity: {side.name} side: setting up")
+        try:
+            setup(side)
+        except RuntimeError as e:
+            say(f"parity: {side.name} side: setup failed: {e}")
+            if side.rex:
+                return 1
+        say(f"parity: {side.name} side: {len(todo)} cases")
+        for c in todo:
+            if c.old is None and c.runner is None:
+                continue
+            argv = c.argv(side)
+            if argv:
+                term = "--rex" if side.rex else "--tmux"
+                argv = [x.replace("{home}", box.home).replace("{term}", term) for x in argv]
+                c_side = Case(c.name, argv, pane=c.pane, kind=c.kind, stdin=c.stdin, timeout=c.timeout)
+            else:
+                c_side = c
+            if c.pane and c.pane not in side.panes_at:
+                results.setdefault(c.name, {})[side.name] = (f"no {c.pane} pane", "", "")
+                continue
+            results.setdefault(c.name, {})[side.name] = c_side.execute(side)
+        side.mux.stop()   # the next side starts from nothing
+
+    intended, _ = read_intended()
+    accept = {}
+    rows = []
+    fired_all = {}
+    for c in todo:
+        r = results.get(c.name, {})
+        if "old" not in r or "new" not in r:
+            continue
+        o, _ = normalize(c, old, r["old"])
+        n, fired = normalize(c, new, r["new"])
+        for f in fired:
+            fired_all.setdefault(f, []).append(c.name)
+        d = os.path.join(box.out, c.name)
+        os.makedirs(d)
+        for k, v in (("old", o), ("new", n)):
+            open(os.path.join(d, f"{k}.txt"), "w").write(v)
+        for k in ("old", "new"):
+            code, out, err = r[k]
+            open(os.path.join(d, f"{k}.raw"), "w").write(f"{out}\n--- stderr\n{err}\n--- exit {code}\n")
+        diff = "".join(difflib.unified_diff(o.splitlines(True), n.splitlines(True), "old", "new", n=2))
+        if diff:
+            open(os.path.join(d, "diff"), "w").write(diff)
+        e = intended.get(c.name)
+        if not diff:
+            status = "pass"
+        elif e and (e["diff"] is None or e["diff"] == diff):
+            status = "intended"
+        elif e:
+            status = "CHANGED"
+        else:
+            status = "DIFF"
+        if diff and ("all" in a.accept or c.name in a.accept):
+            accept[c.name] = diff
+            status = "accepted"
+        rows.append((c.name, status, diff, e))
+
+    if accept:
+        write_intended(intended, accept)
+    width = max((len(r[0]) for r in rows), default=10)
+    counts = {}
+    for name, status, diff, e in rows:
+        counts[status] = counts.get(status, 0) + 1
+        note = ""
+        if status in ("DIFF", "CHANGED", "accepted"):
+            note = f"{sum(1 for l in diff.splitlines() if l[:1] in '+-' and l[:3] not in ('---', '+++'))} lines differ"
+        elif status == "intended":
+            note = e["why"].splitlines()[0][:70] if e["why"] else ""
+        print(f"{status:<9} {name:<{width}}  {note}")
+        if diff and VERBOSE:
+            print("".join("    " + l for l in diff.splitlines(True)))
+    for rule, names_ in fired_all.items():
+        print(f"normalized: {rule} ({len(names_)} cases)")
+    stale = sorted(set(intended) - {r[0] for r in rows}) if not a.only else []
+    for name in stale:
+        print(f"stale     {name}  (in intended.md, but no such case ran)")
+    print(" · ".join(f"{v} {k}" for k, v in sorted(counts.items())) + f"   ({'rex' if a.rex else 'tmux'})")
+    shutil.rmtree(OUT, ignore_errors=True)
+    shutil.copytree(box.out, OUT)
+    print(f"outputs and diffs: {os.path.relpath(OUT)}/<case>/{{old,new}}.txt, diff")
+    return 1 if counts.get("DIFF") or counts.get("CHANGED") else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

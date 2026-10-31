@@ -1,0 +1,5 @@
+#!/bin/sh
+# Installed as `rex` in a tmux-only parity run, so neither side sees the live
+# Rex server (or its sessions).
+echo "Error: Rex is switched off in this sandbox" >&2
+exit 1

@@ -34,6 +34,9 @@ pub struct Pane {
     pub kind: String,
     pub msg: String,
     pub since: String,
+    /// When it entered that state (ISO 8601), as reported.
+    #[serde(skip)]
+    pub since_at: String,
 }
 
 /// A card: a session, or (scoped to one session) a tab.
@@ -231,6 +234,7 @@ impl Looker {
             kind: s(&root["kind"]),
             msg: util::text(root["msg"].as_str().unwrap_or("")),
             since: util::age(root["updated_at"].as_str().unwrap_or("")),
+            since_at: root["updated_at"].as_str().unwrap_or("").to_string(),
         })
     }
 
@@ -347,6 +351,7 @@ impl Looker {
             kind,
             msg,
             since: util::age(&since),
+            since_at: since,
         })
     }
 

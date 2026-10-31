@@ -1185,6 +1185,7 @@ mod tests {
             kind: "".into(),
             msg: "all good".into(),
             since: "2m".into(),
+            since_at: String::new(),
         };
         let data = vec![(Group { session_id: "s".into(), label: "main/stats".into(), mux: "tmux".into(), window_id: None }, vec![p])];
         let f = render(&data, &View::Exchange("main".into()), 60, 0, None, "main", false);

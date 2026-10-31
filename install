@@ -1,89 +1,123 @@
-#!/bin/zsh
+#!/bin/sh
 # install [--build]: install crossbar from this checkout into ~/.crossbar
 # ($CROSSBAR_HOME) and link cbar, switchboard and claude-relay into
-# ~/.local/bin ($CROSSBAR_LINKS). claude-relay is downloaded from the GitHub
-# release for this version (checksum verified), else built with cargo;
-# --build always builds it from this checkout.
-# Your data (projects/, central/) is never touched. Files are replaced by
-# rename, so panes running the old copies keep working.
-emulate -L zsh
+# ~/.local/bin ($CROSSBAR_LINKS). The three binaries come from the GitHub
+# release for this version (checksums verified), else they're built with
+# cargo, else they come from the latest release; --build always builds them
+# from this checkout. Your data (config.toml, exchanges/, and a 0.4 layout's
+# central/ and projects/) is never touched. Files are replaced by rename, so
+# panes running the old copies keep working.
+set -u
 
-src=${0:A:h} dest=${CROSSBAR_HOME:-~/.crossbar} links=${CROSSBAR_LINKS:-~/.local/bin}
+src=$(cd "$(dirname "$0")" && pwd)
+dest=${CROSSBAR_HOME:-$HOME/.crossbar}
+links=${CROSSBAR_LINKS:-$HOME/.local/bin}
 releases=${CROSSBAR_RELEASES:-https://github.com/montanaflynn/crossbar/releases/download}
-version=$(<$src/VERSION)
-commit=$(git -C $src rev-parse --short HEAD 2>/dev/null)
-[[ -n $commit && -n $(git -C $src status --porcelain 2>/dev/null) ]] && commit+=-dirty
+version=$(cat "$src/VERSION")
+commit=$(git -C "$src" rev-parse --short HEAD 2>/dev/null) || commit=
+if [ -n "$commit" ] && [ -n "$(git -C "$src" status --porcelain 2>/dev/null)" ]; then
+  commit=$commit-dirty
+fi
+bins="cbar switchboard claude-relay"
 build=
-[[ $1 == --build ]] && build=1
+[ "${1:-}" = --build ] && build=1
 
-for tool in jq claude python3; do
-  (( $+commands[$tool] )) || print -u2 "install: warning: $tool is not on PATH"
-done
-(( $+commands[rex] || $+commands[tmux] )) || print -u2 "install: warning: neither rex nor tmux is on PATH"
+say() { printf '%s\n' "$*"; }
+warn() { printf 'install: %s\n' "$*" >&2; }
+has() { command -v "$1" >/dev/null 2>&1; }
 
-mkdir -p $dest/bin $dest/central/briefs $dest/central/reports $dest/projects $links || exit 1
+has claude || warn "warning: claude is not on PATH"
+has rex || has tmux || warn "warning: neither rex nor tmux is on PATH"
+
+mkdir -p "$dest/bin" "$links" || exit 1
 
 # put SRC DST MODE: copy next to DST, then rename over it
 put() {
-  local tmp=$2.install.$$
-  cp $1 $tmp && chmod $3 $tmp && mv -f $tmp $2 || { rm -f $tmp; print -u2 "install: could not write $2"; exit 1 }
+  ptmp=$2.install.$$
+  if cp "$1" "$ptmp" && chmod "$3" "$ptmp" && mv -f "$ptmp" "$2"; then
+    return 0
+  fi
+  rm -f "$ptmp"
+  warn "could not write $2"
+  exit 1
 }
-put $src/bin/cbar $dest/bin/cbar 755
-put $src/bin/switchboard $dest/bin/switchboard 755
 
-# claude-relay (Rust) gives Claude's full status in tmux; without it,
-# crossbar runs plain claude there
+# asset NAME: NAME's release asset for this platform
 asset() {
-  local os arch
   case $(uname -s) in Darwin) os=darwin ;; Linux) os=linux ;; *) return 1 ;; esac
   case $(uname -m) in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=x86_64 ;; *) return 1 ;; esac
-  print claude-relay-$os-$arch
+  say "$1-$os-$arch"
 }
 
-# download: the release's binary for this platform, if its checksum matches
+sha256() { { shasum -a 256 "$1" 2>/dev/null || sha256sum "$1"; } | cut -d' ' -f1; }
+
+# download BASE: every binary from the release at BASE, if each checksum matches
 download() {
-  local name tmp ok=
-  name=$(asset) || return 1
+  has curl || return 1
   tmp=$(mktemp -d) || return 1
-  if curl -fsL -o $tmp/$name $releases/v$version/$name &&
-     curl -fsL -o $tmp/SHA256SUMS $releases/v$version/SHA256SUMS; then
-    local sum=$(grep " $name\$" $tmp/SHA256SUMS | cut -d' ' -f1)
-    local got=$( (shasum -a 256 $tmp/$name 2>/dev/null || sha256sum $tmp/$name) | cut -d' ' -f1)
-    if [[ -n $sum && $sum == $got ]]; then
-      put $tmp/$name $dest/bin/claude-relay 755 && ok=1
-    else
-      print -u2 "install: claude-relay download failed its checksum"
-    fi
+  ok=1
+  if curl -fsL -o "$tmp/SHA256SUMS" "$1/SHA256SUMS"; then
+    for b in $bins; do
+      name=$(asset "$b") || { ok=; break; }
+      if ! curl -fsL -o "$tmp/$b" "$1/$name"; then ok=; break; fi
+      sum=$(grep " $name\$" "$tmp/SHA256SUMS" | cut -d' ' -f1)
+      if [ -z "$sum" ] || [ "$sum" != "$(sha256 "$tmp/$b")" ]; then
+        warn "$name failed its checksum"
+        ok=
+        break
+      fi
+    done
+  else
+    ok=
   fi
-  rm -rf $tmp
-  [[ -n $ok ]]
+  if [ -n "$ok" ]; then
+    for b in $bins; do put "$tmp/$b" "$dest/bin/$b" 755; done
+  fi
+  rm -rf "$tmp"
+  [ -n "$ok" ]
 }
 
 compile() {
-  (( $+commands[cargo] )) || return 1
-  cargo build --release --locked -q --manifest-path $src/claude-relay/Cargo.toml &&
-    put $src/claude-relay/target/release/claude-relay $dest/bin/claude-relay 755
+  has cargo || return 1
+  cargo build --release --locked -q --manifest-path "$src/Cargo.toml" || return 1
+  for b in $bins; do put "$src/target/release/$b" "$dest/bin/$b" 755; done
 }
 
-if [[ -n $build ]]; then
-  compile || print -u2 "install: warning: claude-relay did not build; tmux shows less status"
-elif ! download && ! compile; then
-  print -u2 "install: warning: no claude-relay for v$version (no release binary, no cargo); tmux shows less status"
+if [ -n "$build" ]; then
+  compile || { warn "the build failed"; exit 1; }
+elif download "$releases/v$version"; then
+  :
+elif compile; then
+  :
+elif download "${releases%/download}/latest/download"; then
+  warn "warning: no release for v$version and no cargo; installed the latest release's binaries"
+else
+  warn "no binaries for v$version: no release to download and no cargo to build them (https://rustup.rs)"
+  exit 1
 fi
-rm -f $dest/bin/relay   # the Python relay it replaced
-put $src/operator.md $dest/operator.md 644
+rm -f "$dest/bin/relay"   # the Python relay of 0.3
+put "$src/operator.md" "$dest/operator.md" 644
+put "$src/supervisor.md" "$dest/supervisor.md" 644
 
-for f in cbar switchboard claude-relay; do
-  [[ -e $dest/bin/$f ]] || continue
-  if [[ $(readlink $links/$f) == $dest/bin/$f ]]; then
+for f in $bins; do
+  [ -e "$dest/bin/$f" ] || continue
+  if [ "$(readlink "$links/$f" 2>/dev/null)" = "$dest/bin/$f" ]; then
     continue
-  elif [[ -e $links/$f && ! -L $links/$f ]]; then
-    print -u2 "install: ${links/#$HOME/~}/$f exists and is not a link; left it alone"
+  elif [ -e "$links/$f" ] && [ ! -L "$links/$f" ]; then
+    warn "$links/$f exists and is not a link; left it alone"
   else
-    ln -sfn $dest/bin/$f $links/$f
+    ln -sfn "$dest/bin/$f" "$links/$f"
   fi
 done
 
-print -r -- "$version${commit:+ ($commit)}" >$dest/version
-print "installed crossbar $version${commit:+ ($commit)} in ${dest/#$HOME/~}"
-(( ${path[(Ie)$links]} )) || print "add ${links/#$HOME/~} to your PATH"
+if [ -n "$commit" ]; then
+  say "$version ($commit)" > "$dest/version"
+  say "installed crossbar $version ($commit) in $dest"
+else
+  say "$version" > "$dest/version"
+  say "installed crossbar $version in $dest"
+fi
+case ":$PATH:" in *":$links:"*) ;; *) say "add $links to your PATH" ;; esac
+if [ ! -d "$dest/exchanges" ] && { [ -d "$dest/projects" ] || [ -d "$dest/central" ]; }; then
+  say "$dest has the 0.4 layout: run \`cbar migrate\` to move it into exchanges/main"
+fi

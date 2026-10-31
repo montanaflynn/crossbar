@@ -199,6 +199,7 @@ pub fn utc_iso_now() -> String {
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}+00:00", rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
+#[allow(deprecated)] // libc::time_t on musl
 fn local_tm(secs: i64) -> libc::tm {
     unsafe {
         let t: libc::time_t = secs as libc::time_t;

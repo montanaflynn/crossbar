@@ -85,6 +85,18 @@ pub fn find(root: i64) -> Option<Session> {
     under(root, live_sessions(), &parents())
 }
 
+/// Whether SCREEN shows Claude Code's question on /exit in a worktree
+/// session (`claude -w`) with "Keep worktree" chosen, so Enter keeps it:
+///
+///   Exiting worktree session
+///   ❯ 1. Keep worktree    Stays at …/.claude/worktrees/NAME
+///     2. Remove worktree  Clean up the worktree directory.
+pub fn keep_worktree_prompt(screen: &str) -> bool {
+    let lines: Vec<&str> = screen.lines().collect();
+    let Some(at) = lines.iter().rposition(|l| l.contains("Exiting worktree session")) else { return false };
+    lines[at..].iter().any(|l| l.trim_start().strip_prefix('❯').is_some_and(|rest| rest.trim_start().trim_start_matches("1.").trim_start().starts_with("Keep worktree")))
+}
+
 /// Wait up to LIMIT for PID to exit.
 pub fn wait_exit(pid: i64, limit: Duration) -> bool {
     let until = std::time::Instant::now() + limit;
@@ -107,6 +119,17 @@ mod tests {
         assert_eq!(s, Session { pid: 69568, id: "ccf09a1c-353f".into(), cwd: "/w".into() });
         assert_eq!(parse(r#"{"pid":1}"#), None);
         assert_eq!(parse("nope"), None);
+    }
+
+    #[test]
+    fn sees_the_keep_worktree_question() {
+        // as Claude Code 2.1.316 draws it after /exit in a `claude -w` session
+        let asked = "❯ /exit\n──────── probe ─\n  Exiting worktree session\n  This session was named \"probe\". Keep the worktree to resume it later, or remove it to clean up.\n  ❯ 1. Keep worktree    Stays at /tmp/x/.claude/worktrees/probe\n    2. Remove worktree  Clean up the worktree directory.\n  Enter to confirm · Esc to cancel\n";
+        assert!(keep_worktree_prompt(asked));
+        let remove = asked.replace("  ❯ 1. Keep", "    1. Keep").replace("    2. Remove", "  ❯ 2. Remove");
+        assert!(!keep_worktree_prompt(&remove));
+        assert!(!keep_worktree_prompt("❯ /exit\n  ❯ 1. Keep worktree\n")); // not after the question
+        assert!(!keep_worktree_prompt("❯ \n  ⏵⏵ auto mode on\n"));
     }
 
     #[test]

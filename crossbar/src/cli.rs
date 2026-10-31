@@ -944,7 +944,20 @@ fn cmd_restart(home: &Home, args: Vec<String>) {
     if let Err(e) = mux::send_line(t.term, &session, &f.pane.block_id, "/exit") {
         util::warn(format!("could not type /exit: {e}"));
     }
-    if !restart::wait_exit(cs.pid, Duration::from_secs(20)) {
+    // a Claude started with -w asks on /exit whether to keep its worktree: keep it
+    let until = Instant::now() + Duration::from_secs(20);
+    let mut answered = false;
+    while util::alive(&cs.pid.to_string()) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(500));
+        if !answered && restart::keep_worktree_prompt(&mux::capture(t.term, &session, &f.pane.block_id, 60)) {
+            println!("it asks whether to keep its worktree: keeping it");
+            if let Err(e) = mux::send_enter(t.term, &session, &f.pane.block_id) {
+                util::warn(format!("could not answer it: {e}"));
+            }
+            answered = true;
+        }
+    }
+    if !restart::wait_exit(cs.pid, Duration::from_millis(500)) {
         println!("it didn't quit on /exit; sending it SIGTERM");
         unsafe { libc::kill(cs.pid as libc::pid_t, libc::SIGTERM) };
         if !restart::wait_exit(cs.pid, Duration::from_secs(5)) {

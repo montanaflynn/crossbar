@@ -18,7 +18,10 @@
 #                        does (sessionId: the --resume ID, else a new one), and
 #                        removes it when it quits
 #   typed /exit          quits, and like a Claude takes the rest of its process
-#                        group with it (after a typed /deaf it ignores /exit)
+#                        group with it (after a typed /deaf it ignores /exit);
+#                        started with -w, it first asks as Claude Code does whether
+#                        to keep the worktree, and quits on Enter (Keep), writing
+#                        "kept" to $CBAR_STUB_LOG/NAME.PID.exit
 #   typed /sh CMD        works while sh -c CMD runs (a Claude running a tool), then done
 
 if [ "$1" = agents ]; then
@@ -78,18 +81,37 @@ echo "brief: ${brief##*/}"
 echo "state: ${script:-idle}"
 emit "${script:-idle}"
 
-deaf=
+leave() {
+  [ -n "$session_file" ] && rm -f "$session_file"
+  trap '' TERM
+  kill -TERM 0 2>/dev/null
+  exit 0
+}
+
+deaf= asking=
 trap quit HUP TERM INT
 while IFS= read -r line; do
   echo "> $line"
+  if [ -n "$asking" ]; then
+    if [ -z "$line" ]; then
+      [ -n "$CBAR_STUB_LOG" ] && echo kept > "$CBAR_STUB_LOG/$name.$$.exit"
+      leave
+    fi
+    continue
+  fi
   case $line in
     '/state '*) emit "${line#/state }" ;;
     /exit)
-      if [ -z "$deaf" ]; then
-        [ -n "$session_file" ] && rm -f "$session_file"
-        trap '' TERM
-        kill -TERM 0 2>/dev/null
-        exit 0
+      if [ -n "$deaf" ]; then
+        :
+      elif [ "$wt" != - ]; then
+        asking=1
+        echo "  Exiting worktree session"
+        echo "  ❯ 1. Keep worktree    Stays at $PWD/.claude/worktrees/$wt"
+        echo "    2. Remove worktree  Clean up the worktree directory."
+        echo "  Enter to confirm · Esc to cancel"
+      else
+        leave
       fi
       ;;
     /deaf) deaf=1 ;;

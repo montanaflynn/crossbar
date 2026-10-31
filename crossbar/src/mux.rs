@@ -344,6 +344,11 @@ pub fn send_line(term: Term, session: &str, pane: &str, text: &str) -> Result<()
         return Err(err);
     }
     std::thread::sleep(Duration::from_millis(400));
+    send_enter(term, session, pane)
+}
+
+/// Press Enter in PANE.
+pub fn send_enter(term: Term, session: &str, pane: &str) -> Result<(), String> {
     let (code, _, err) = match term {
         Term::Rex => rex(&strings(&["send", "-s", session, "-b", pane, "\r"])),
         Term::Tmux => tmux_s(&["send-keys", "-t", pane, "Enter"]),

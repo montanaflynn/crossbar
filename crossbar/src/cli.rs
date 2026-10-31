@@ -398,11 +398,15 @@ fn cmd_run(home: &Home, args: Vec<String>) {
     let usage = "cbar run [--pane] supervisor|operator|board|agent [PATH] [--no-worktree]";
     let a = parse(&args, &["--pane", "--no-worktree"], usage);
     let pane = a.has("--pane");
+    if pane {
+        // a pane started for this: if it fails, keep the message on screen
+        util::on_die(launch::login_shell);
+    }
     let Some(role) = a.pos.first().map(String::as_str) else { die(format!("usage: {usage}")) };
     let node = match a.pos.get(1) {
         Some(p) => {
             home.require_migrated();
-            resolve(home, p, if role == "agent" { Want::New { agent: false } } else { Want::Existing })
+            resolve(home, p, if role == "agent" { Want::New { agent: true } } else { Want::Existing })
         }
         None => paths::here(home),
     };

@@ -275,11 +275,10 @@ impl Looker {
     }
 
     /// One Rex session, grouped by tab, in tab order.
-    pub fn rex_tabs(&self, sid: &str, label: &str) -> Snapshot {
+    pub fn rex_tabs(&self, sid: &str) -> Snapshot {
         let (windows, blocks) = Self::rex_layout(sid);
         let tabs: HashMap<String, String> = windows.iter().cloned().collect();
         let panes = parallel(&blocks, |b| self.rex_pane(sid, b, &tabs));
-        let _ = label;
         windows
             .iter()
             .map(|(wid, wl)| {
@@ -387,7 +386,7 @@ impl Looker {
     pub fn snapshot(&self, scope: Option<&str>) -> Snapshot {
         match scope {
             Some(s) if mux::is_tmux_id(s) => self.tmux_snapshot(Some(s)),
-            Some(s) => self.rex_tabs(s, ""),
+            Some(s) => self.rex_tabs(s),
             None => {
                 let mut all = self.rex_snapshot();
                 all.extend(self.tmux_snapshot(None));

@@ -154,7 +154,7 @@ pub fn app_client() -> Option<String> {
     apps.first().and_then(|c| c["client_id"].as_str()).map(String::from)
 }
 
-/// A pane created with its own command: its id, and its tab's id (Rex).
+/// A pane created with its own command.
 pub struct Made {
     pub pane: String,
 }

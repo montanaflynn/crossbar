@@ -22,7 +22,16 @@
 #                        started with -w, it first asks as Claude Code does whether
 #                        to keep the worktree, and quits on Enter (Keep), writing
 #                        "kept" to $CBAR_STUB_LOG/NAME.PID.exit
+#                        after a typed /bg (background work: a Monitor running
+#                        cbar watch) it first asks whether to stop it, as Claude
+#                        Code does, and goes on to quit on Enter ("Exit and stop
+#                        tasks"), writing "stopped" to $CBAR_STUB_LOG/NAME.PID.bg
 #   typed /sh CMD        works while sh -c CMD runs (a Claude running a tool), then done
+#   ~/.claude/stub-untrusted  folders, one a line: started in one, it first asks to
+#                        trust it as Claude Code does, with "No, exit" chosen, and
+#                        reports no state. Any line typed there answers it: it
+#                        writes the line to $CBAR_STUB_LOG/NAME.PID.trust and quits
+#                        (No, exit); a typed /trust answers Yes and goes on
 
 if [ "$1" = agents ]; then
   echo '[]'
@@ -72,6 +81,30 @@ quit() {
   exit 0
 }
 
+untrusted="$HOME/.claude/stub-untrusted"
+if [ -f "$untrusted" ] && grep -qxF "$PWD" "$untrusted"; then
+  echo " Accessing workspace:"
+  echo
+  echo " $PWD"
+  echo
+  echo " Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not,"
+  echo " take a moment to review what's in this folder first."
+  echo
+  echo " Claude Code'll be able to read, edit, and execute files here."
+  echo
+  echo " Security guide"
+  echo
+  echo " ❯ No, exit"
+  echo "   Yes, I trust this folder"
+  echo
+  echo " Enter to confirm · Esc to cancel"
+  IFS= read -r line
+  if [ "$line" != /trust ]; then
+    [ -n "$CBAR_STUB_LOG" ] && printf '%s\n' "$line" > "$CBAR_STUB_LOG/$name.$$.trust"
+    quit
+  fi
+fi
+
 script=
 [ -n "$brief" ] && [ -f "$brief" ] && script=$(sed -n '1s/^stub: //p' "$brief")
 echo "stub claude: $name"
@@ -88,12 +121,26 @@ leave() {
   exit 0
 }
 
-deaf= asking=
+ask_worktree() {
+  asking=wt
+  echo "  Exiting worktree session"
+  echo "  ❯ 1. Keep worktree    Stays at $PWD/.claude/worktrees/$wt"
+  echo "    2. Remove worktree  Clean up the worktree directory."
+  echo "  Enter to confirm · Esc to cancel"
+}
+
+deaf= asking= bg=
 trap quit HUP TERM INT
 while IFS= read -r line; do
   echo "> $line"
   if [ -n "$asking" ]; then
     if [ -z "$line" ]; then
+      if [ "$asking" = bg ]; then
+        [ -n "$CBAR_STUB_LOG" ] && echo stopped > "$CBAR_STUB_LOG/$name.$$.bg"
+        bg=
+        if [ "$wt" != - ]; then ask_worktree; else leave; fi
+        continue
+      fi
       [ -n "$CBAR_STUB_LOG" ] && echo kept > "$CBAR_STUB_LOG/$name.$$.exit"
       leave
     fi
@@ -104,17 +151,23 @@ while IFS= read -r line; do
     /exit)
       if [ -n "$deaf" ]; then
         :
-      elif [ "$wt" != - ]; then
-        asking=1
-        echo "  Exiting worktree session"
-        echo "  ❯ 1. Keep worktree    Stays at $PWD/.claude/worktrees/$wt"
-        echo "    2. Remove worktree  Clean up the worktree directory."
+      elif [ -n "$bg" ]; then
+        asking=bg
+        echo "  Background work is running"
+        echo "  The following will stop when you exit:"
+        echo "  monitor · cbar watch"
+        echo "  ❯ 1. Exit and stop tasks"
+        echo "    2. Move to background and exit"
+        echo "    3. Stay"
         echo "  Enter to confirm · Esc to cancel"
+      elif [ "$wt" != - ]; then
+        ask_worktree
       else
         leave
       fi
       ;;
     /deaf) deaf=1 ;;
+    /bg) bg=1 ;;
     '/sh '*)
       emit working
       sh -c "${line#/sh }"

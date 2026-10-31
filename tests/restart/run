@@ -8,9 +8,12 @@ The stub claude (tests/parity/stub/claude) records each start's argv and
 writes ~/.claude/sessions/PID.json under the scratch HOME, as Claude Code
 does. The cases: an idle operator, a done agent, the supervisor; a blocked
 and a working agent refused; a Claude whose session file is missing refused
-with nothing killed; a Claude that ignores /exit (SIGTERM); and an operator
-restarting its own pane from a tool it runs (its process group goes when it
-quits). Each restart must resume the old session id, pass the current role
+with nothing killed; a Claude that ignores /exit (SIGTERM); one with
+background work, which Claude asks to stop on /exit; an operator restarting
+its own pane from a tool it runs (its process group goes when it quits); and
+a supervisor whose session is in ~, which resumes there and stops at Claude's
+folder-trust prompt, unanswered. Also an exchange's `path`: where its
+supervisor and agents start. Each restart must resume the old session id, pass the current role
 prompt, keep the pane's place and the board next to it, and type why.
 Prints one line per check; exits 1 if any fails.
 """
@@ -119,7 +122,7 @@ def wait_for(fn, limit=60, step=0.5):
     return fn()
 
 
-def restarted(w, label, path, session, tab, name, prompt_mark=None, run=None, want_worktree_flag=None, sigterm=False, keeps=False):
+def restarted(w, label, path, session, tab, name, prompt_mark=None, run=None, want_worktree_flag=None, sigterm=False, keeps=False, stops=False):
     """Restart PATH (or RUN does) and check what came back in its place."""
     w.cbar("wait", path, "60")   # a restarted stub works on the why-line for a moment
     before = w.starts(name)
@@ -143,6 +146,9 @@ def restarted(w, label, path, session, tab, name, prompt_mark=None, run=None, wa
     kept = os.path.exists(os.path.join(w.log, f"{name}.{old_pid}.exit"))
     check(f"{label}: {'kept its worktree when asked' if keeps else 'was not asked about a worktree'}",
           kept == keeps and (("keeping it" in out) == keeps or bool(run)), out.strip())
+    stopped = os.path.exists(os.path.join(w.log, f"{name}.{old_pid}.bg"))
+    check(f"{label}: {'stopped its background work when asked' if stops else 'was not asked about background work'}",
+          stopped == stops and (("stopping it" in out) == stops or bool(run)), out.strip())
     i = argv.index("--resume") if "--resume" in argv else -1
     check(f"{label}: resumes session {old.get('sessionId')}", i >= 0 and argv[i + 1] == old.get("sessionId"), " ".join(argv)[:300])
     new = wait_for(lambda: w.session(new_pid), limit=10) or {}
@@ -199,6 +205,13 @@ def cases(w):
     refused(w, "missing session file", f"{alpha}/t-chat", "t-chat", "found no Claude session file")
     os.rename(os.path.join(w.sessions, f"{chat}.json.hidden"), os.path.join(w.sessions, f"{chat}.json"))
 
+    # background work (a cbar watch Monitor): Claude asks on /exit whether to
+    # stop it; t-chat was started with -w, so then it asks about its worktree
+    chat = w.pane(alpha, "t-chat")
+    s.mux.send_line(chat["sid"], chat["pane"], "/bg")
+    time.sleep(1)
+    restarted(w, "agent with background work", f"{alpha}/t-chat", alpha, "t-chat", "t-chat", want_worktree_flag=False, keeps=True, stops=True)
+
     # a Claude that doesn't quit on /exit gets SIGTERM
     nogit = w.pane(beta, "t-nogit")
     s.mux.send_line(nogit["sid"], nogit["pane"], "/deaf")
@@ -221,6 +234,78 @@ def cases(w):
     text = open(log).read() if os.path.exists(log) else ""
     check("own pane: the detached restart logged it", "restarted central/beta/operator" in text, text[-300:])
     check("own pane: it quit on /exit", "SIGTERM" not in text, text[-300:])
+
+    exchange_path(w)
+    trust(w)
+
+
+def exchange_path(w):
+    """An exchange's supervisor and agents start in its `path`, else in its own
+    folder; never in ~ (Claude Code asks to trust ~ each time)."""
+    s, E = w.s, P.EXCHANGE
+    exdir = os.path.join(s.cb, "exchanges", E)
+    toml = os.path.join(exdir, "exchange.toml")
+    sup = w.starts(f"{E} supervisor")[0][0]
+    first = w.session(sup)
+    # its first supervisor is gone (restarted), its start's cwd is in the restarted one's file
+    now = w.session(w.starts(f"{E} supervisor")[-1][0]) or {}
+    check("exchange path: no path: the supervisor starts in the exchange's folder",
+          os.path.realpath(now.get("cwd", "")) == os.path.realpath(exdir), f"{now.get('cwd')} (first: {first})")
+    code, out, _ = w.cbar("ls")
+    row = next((l for l in out.splitlines() if l.startswith(E + " ")), "")
+    check("exchange path: ls shows the exchange's folder", f" {s.box.short(exdir)} " in row, row)
+    # the operator adds a path by hand, with ~
+    work = os.path.join(s.box.home, "central")
+    os.makedirs(work, exist_ok=True)
+    with open(toml, "a") as f:
+        f.write('path = "~/central"\n')
+    code, out, err = w.cbar("up")
+    check("exchange path: cbar up keeps it", code == 0 and 'path = "~/central"' in open(toml).read(), open(toml).read() + out + err)
+    code, out, _ = w.cbar("ls")
+    row = next((l for l in out.splitlines() if l.startswith(E + " ")), "")
+    check("exchange path: ls shows it", " ~/central " in row, row)
+    shutil.copy(os.path.join(HERE, "..", "parity", "fixtures", "briefs", "t-chat.md"), os.path.join(exdir, "briefs", "t-ex.md"))
+    code, out, err = w.cbar("new", "--agent", "t-ex")
+    started = wait_for(lambda: w.starts("t-ex"), limit=30)
+    cwd = (wait_for(lambda: started and w.session(started[-1][0]), limit=10) or {}).get("cwd", "")
+    check("exchange path: an exchange agent starts in it", code == 0 and os.path.realpath(cwd) == os.path.realpath(work), f"{code}: {out} {err} cwd={cwd}")
+    # a missing folder: a clear error
+    with open(toml) as f:
+        text = f.read()
+    with open(toml, "w") as f:
+        f.write(text.replace('path = "~/central"', 'path = "~/nope"'))
+    shutil.copy(os.path.join(exdir, "briefs", "t-ex.md"), os.path.join(exdir, "briefs", "t-ex2.md"))
+    code, out, err = w.cbar("new", "--agent", "t-ex2")
+    check("exchange path: a missing folder is an error", code == 1 and "no folder ~/nope" in err, f"{code}: {out} {err}")
+    with open(toml, "w") as f:
+        f.write(text)
+
+
+def trust(w):
+    """A supervisor whose session is keyed to ~ (started before 0.5.2) resumes
+    in ~, where Claude Code asks to trust the folder: cbar reports that, exits
+    1, and never answers it or types the why-line into it."""
+    s, E = w.s, P.EXCHANGE
+    pid = w.starts(f"{E} supervisor")[-1][0]
+    f = os.path.join(w.sessions, f"{pid}.json")
+    d = json.load(open(f))
+    d["cwd"] = s.box.home
+    json.dump(d, open(f, "w"))
+    with open(os.path.join(s.box.home, ".claude", "stub-untrusted"), "w") as u:
+        u.write(s.box.home + "\n")
+    before = len(w.starts(f"{E} supervisor"))
+    code, out, err = w.cbar("restart", E)
+    want = f"{E}'s Claude is waiting at the folder-trust prompt for ~; answer it in its pane"
+    check("trust prompt: restart says so and exits 1", code == 1 and want in err, f"{code}: {out.strip()} | {err.strip()}")
+    after = w.starts(f"{E} supervisor")
+    check("trust prompt: a new Claude started", len(after) == before + 1)
+    new = after[-1][0]
+    check("trust prompt: it resumed in ~, where its conversation is",
+          os.path.realpath((w.session(new) or {}).get("cwd", "")) == os.path.realpath(s.box.home), str(w.session(new)))
+    time.sleep(3)
+    check("trust prompt: nobody answered it", not os.path.exists(os.path.join(w.log, f"{E} supervisor.{new}.trust")) and alive(new))
+    check("trust prompt: the why-line wasn't typed", "crossbar restarted you" not in w.tail(E))
+    os.remove(os.path.join(s.box.home, ".claude", "stub-untrusted"))
 
 
 def main():

@@ -37,6 +37,10 @@ pub struct Pane {
     /// When it entered that state (ISO 8601), as reported.
     #[serde(skip)]
     pub since_at: String,
+    /// The pid of the process that reported the state (Rex: the record's
+    /// owner; tmux: claude-relay, or the Claude from `claude agents`), if known.
+    #[serde(skip)]
+    pub owner: Option<i64>,
 }
 
 /// A card: a session, or (scoped to one session) a tab.
@@ -52,10 +56,18 @@ pub struct Group {
 pub type Snapshot = Vec<(Group, Vec<Pane>)>;
 
 /// What to leave out (our own pane) and what to remember between looks.
+///
+/// A read that fails (a `rex block call` that errors or times out, a
+/// `claude agents` that does) says nothing about the pane, so a Looker that
+/// looks again (watch, the switchboard) uses its last good read instead: a
+/// failed read is not "no status". Whether the status is stale is still
+/// judged now, from its owner's pid.
 pub struct Looker {
     pub hide: HashSet<String>,
     me: u32,
     since: Mutex<HashMap<String, (String, String)>>, // tmux pane → (state, first seen)
+    rex_last: Mutex<HashMap<String, (Value, Value)>>, // Rex block → last good (process, program_status)
+    agents_last: Mutex<Option<Vec<Value>>>,           // last good `claude agents --json`
 }
 
 impl Default for Looker {
@@ -121,15 +133,23 @@ pub fn tmux_rows() -> Vec<Row> {
         .collect()
 }
 
-/// {pane pid: Claude session from `claude agents`} for panes running Claude.
-fn claude_by_pane(pane_pids: &HashSet<i64>) -> HashMap<i64, Value> {
-    if pane_pids.is_empty() {
+/// The Claude sessions `claude agents --json` lists, or None if it failed.
+fn claude_agents() -> Option<Vec<Value>> {
+    let (code, out, _) = util::run("claude", &util::strings(&["agents", "--json"]), Duration::from_secs(5));
+    if code != 0 {
+        return None;
+    }
+    match serde_json::from_str::<Value>(if out.trim().is_empty() { "[]" } else { &out }) {
+        Ok(Value::Array(sessions)) => Some(sessions),
+        _ => None,
+    }
+}
+
+/// {pane pid: Claude session from SESSIONS} for panes running Claude.
+fn claude_by_pane(pane_pids: &HashSet<i64>, sessions: Vec<Value>) -> HashMap<i64, Value> {
+    if pane_pids.is_empty() || sessions.is_empty() {
         return HashMap::new();
     }
-    let (_, out, _) = util::run("claude", &util::strings(&["agents", "--json"]), Duration::from_secs(5));
-    let Ok(Value::Array(sessions)) = serde_json::from_str::<Value>(if out.trim().is_empty() { "[]" } else { &out }) else {
-        return HashMap::new();
-    };
     let (_, ps, _) = util::run("ps", &util::strings(&["-A", "-o", "pid=,ppid="]), Duration::from_secs(5));
     let mut parent = HashMap::new();
     for line in ps.lines() {
@@ -188,7 +208,32 @@ impl Looker {
         } else {
             HashSet::new()
         };
-        Looker { hide, me: std::process::id(), since: Mutex::new(HashMap::new()) }
+        Looker {
+            hide,
+            me: std::process::id(),
+            since: Mutex::new(HashMap::new()),
+            rex_last: Mutex::new(HashMap::new()),
+            agents_last: Mutex::new(None),
+        }
+    }
+
+    /// Block BID's (process, program_status): what Rex answers now (None if
+    /// a call failed), else the last good answer for the block.
+    fn rex_read(&self, bid: &str, proc: Option<Value>, status: Option<Value>) -> (Value, Value) {
+        let mut last = self.rex_last.lock().unwrap();
+        let (old_proc, old_status) = last.get(bid).cloned().unwrap_or((Value::Null, Value::Null));
+        let got = (proc.unwrap_or(old_proc), status.unwrap_or(old_status));
+        last.insert(bid.to_string(), got.clone());
+        got
+    }
+
+    /// `claude agents`, or when it fails the last good answer.
+    fn agents(&self) -> Vec<Value> {
+        let mut last = self.agents_last.lock().unwrap();
+        if let Some(now) = claude_agents() {
+            *last = Some(now);
+        }
+        last.clone().unwrap_or_default()
     }
 
     fn rex_pane(&self, sid: &str, block: &Value, tabs: &HashMap<String, String>) -> Option<Pane> {
@@ -196,12 +241,29 @@ impl Looker {
         if self.hide.contains(&bid) {
             return None;
         }
-        let proc = rex_json(&["block", "call", "-s", sid, "-b", &bid, "process"]).unwrap_or(Value::Null);
+        let proc = rex_json(&["block", "call", "-s", sid, "-b", &bid, "process"]);
+        let status = rex_json(&["block", "call", "-s", sid, "-b", &bid, "program_status"]);
+        let (proc, status) = self.rex_read(&bid, proc, status);
+        self.rex_pane_from(sid, &bid, block, tabs, &proc, &status, |pid| util::alive(&pid.to_string()))
+    }
+
+    /// Block BID as a pane, from Rex's PROC (process) and STATUS
+    /// (program_status); ALIVE says whether a pid still runs.
+    #[allow(clippy::too_many_arguments)]
+    fn rex_pane_from(
+        &self,
+        sid: &str,
+        bid: &str,
+        block: &Value,
+        tabs: &HashMap<String, String>,
+        proc: &Value,
+        status: &Value,
+        alive: impl Fn(i64) -> bool,
+    ) -> Option<Pane> {
         let fg = &proc["foreground"];
         if fg["pid"].as_u64() == Some(self.me as u64) {
             return None;
         }
-        let status = rex_json(&["block", "call", "-s", sid, "-b", &bid, "program_status"]).unwrap_or(Value::Null);
         let records = status["records"].as_array().cloned().unwrap_or_default();
         let root = records
             .iter()
@@ -210,10 +272,12 @@ impl Looker {
             .cloned()
             .unwrap_or(Value::Null);
         // a status left by a program that has exited is stale
-        let root = match root["owner"]["pid"].as_i64() {
-            Some(pid) if !util::alive(&pid.to_string()) => Value::Null,
+        let owner = root["owner"]["pid"].as_i64();
+        let root = match owner {
+            Some(pid) if !alive(pid) => Value::Null,
             _ => root,
         };
+        let owner = owner.filter(|_| !root.is_null());
         let program = [&fg["script"], &fg["argv0"], &fg["name"]]
             .iter()
             .filter_map(|v| v.as_str())
@@ -224,7 +288,7 @@ impl Looker {
         let s = |v: &Value| v.as_str().unwrap_or("").to_string();
         Some(Pane {
             session_id: sid.to_string(),
-            block_id: bid,
+            block_id: bid.to_string(),
             tab: tabs.get(&wid).cloned().unwrap_or_default(),
             window_id: wid,
             label: s(&block["label"]),
@@ -235,6 +299,7 @@ impl Looker {
             msg: util::text(root["msg"].as_str().unwrap_or("")),
             since: util::age(root["updated_at"].as_str().unwrap_or("")),
             since_at: root["updated_at"].as_str().unwrap_or("").to_string(),
+            owner,
         })
     }
 
@@ -303,8 +368,10 @@ impl Looker {
             (state, kind, msg, since) = Default::default();
         }
         let relayed = !state.is_empty();
+        let mut owner = row["@cbar_relay"].parse::<i64>().ok().filter(|_| relayed);
         if state.is_empty() {
             if let Some(s) = s {
+                owner = s["pid"].as_i64();
                 let st = s["state"].as_str().unwrap_or("");
                 state = if ORDER.contains(&st) {
                     st.to_string()
@@ -327,6 +394,7 @@ impl Looker {
             }
         }
         let role = &row["@cbar_role"];
+        let state_empty = state.is_empty();
         Some(Pane {
             session_id: row["session_id"].clone(),
             block_id: row["pane_id"].clone(),
@@ -352,6 +420,7 @@ impl Looker {
             msg,
             since: util::age(&since),
             since_at: since,
+            owner: owner.filter(|_| !state_empty),
         })
     }
 
@@ -359,7 +428,7 @@ impl Looker {
     pub fn tmux_snapshot(&self, scope: Option<&str>) -> Snapshot {
         let rows = tmux_rows();
         let pids: HashSet<i64> = rows.iter().filter_map(|r| r["pane_pid"].parse().ok()).collect();
-        let claude = claude_by_pane(&pids);
+        let claude = if pids.is_empty() { HashMap::new() } else { claude_by_pane(&pids, self.agents()) };
         let mut out: Snapshot = Vec::new();
         for r in &rows {
             let (key, g) = match scope {

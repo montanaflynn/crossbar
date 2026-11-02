@@ -1240,6 +1240,7 @@ mod tests {
             msg: "all good".into(),
             since: "2m".into(),
             since_at: String::new(),
+            owner: None,
         };
         let data = vec![(Group { session_id: "s".into(), label: "central/stats".into(), mux: "tmux".into(), window_id: None }, vec![p])];
         let f = render(&data, &View::Exchange("central".into()), 60, 0, None, "central", false);

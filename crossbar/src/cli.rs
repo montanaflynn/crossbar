@@ -37,7 +37,8 @@ exchange), `stats` is its project. `/central/stats` is absolute, `..` goes up.
       [--tmux|--rex]                 in DIR (`path` in its exchange.toml; default: its own
                                      folder under ~/.crossbar/exchanges/), where its agents start
   up [EXCHANGE] [--tmux|--rex]       start the exchange's supervisor and main switchboard and
-                                     every project's session and operator that isn't running;
+                                     every project's session, operator and local switchboard
+                                     that isn't running (a board pane with only a shell counts);
                                      leaves whatever runs alone
   ls [PATH]                          exchanges > projects > agents, with their status
   open [-n] PATH                     switch to that session (an agent: its tab)

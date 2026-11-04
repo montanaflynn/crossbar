@@ -46,7 +46,7 @@ Start an exchange and its projects:
 
 ```sh
 cbar up                      # the exchange's supervisor and main switchboard, and every
-                             # project's session and operator that isn't running
+                             # project's session, operator and switchboard that isn't running
 cbar new stats ~/code/stats  # a project: its session, an operator and a local switchboard
 ```
 
@@ -83,8 +83,9 @@ cbar new --agent AGENT [BRIEF]         the same in the exchange's own session
 cbar new --exchange NAME [DIR]         create an exchange and start its supervisor and main board
                                        in DIR (see below)
 cbar up [EXCHANGE] [--tmux|--rex]      start the supervisor, the main switchboard and every
-                                       project's session and operator that isn't running; leaves
-                                       whatever runs alone
+                                       project's session, operator and local switchboard that
+                                       isn't running (a board pane with only a shell counts);
+                                       leaves whatever runs alone
 cbar ls [PATH]                         exchanges > projects > agents, with their status
 cbar open [-n] PATH                    switch to that session (an agent: its tab; outside tmux,
                                        attach; -n prints the command)
@@ -133,6 +134,8 @@ board shows that session's tabs; its `↖ central` link (named after the exchang
 to the exchange's main board.
 Keys: `j`/`k` or the arrows select, tab moves to the next card, enter jumps, a number opens a
 card, `q` quits. The mouse works too: click a row or a card's header to jump.
+A board that exits says why on its pane and in `~/.crossbar/logs/switchboard.log` (along with
+when each board started); `cbar up` starts any that are missing.
 
 ### Rex and tmux
 

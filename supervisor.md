@@ -52,8 +52,8 @@ agents.
   the current crossbar and role prompt, keeping its conversation (after
   `cbar update`, say). `cbar restart <exchange>` restarts you the same way once
   your turn ends; afterwards, start `cbar watch` again.
-- `cbar up` starts any project session or operator that isn't running and
-  leaves the rest alone. `cbar new <project> <dir>` registers a new project,
+- `cbar up` starts any project session, operator or switchboard that isn't
+  running and leaves the rest alone. `cbar new <project> <dir>` registers a new project,
   when the user asks for one.
 - Never use Claude's built-in Agent-tool subagents. Work goes to operators, or
   to agents in tabs of the exchange's session.

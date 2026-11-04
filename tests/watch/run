@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""Test `cbar watch`'s stopped in a sandbox: a private tmux server, or a
+private Rex server, never the live one (the parity harness's sandbox,
+tests/parity/run).
+
+  tests/watch/run [--rex] [--keep] [--no-build] [-v] CHECKOUT
+
+The supervisor's watch hears the operators of alpha and beta, idle (stub
+Claudes, tests/parity/stub/claude). In Rex, its `rex block call`s then fail
+for a few looks, as the live ones did when the Rex server was slow (they
+timed out at cbar's 5s): 0.5.2 printed "<project> operator: stopped" for
+Claudes that were still there. Nothing may be printed for that. Then beta's
+Claude really quits (/exit): "beta operator: stopped" must come within a
+look or two, and the pane, once closed, "closed". Prints one line per check;
+exits 1 if any fails.
+"""
+import argparse
+import importlib.machinery
+import importlib.util
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+_loader = importlib.machinery.SourceFileLoader("parity", os.path.join(HERE, "..", "parity", "run"))
+_spec = importlib.util.spec_from_loader("parity", _loader)
+P = importlib.util.module_from_spec(_spec)
+_loader.exec_module(P)
+
+FAILS = []
+VERBOSE = False
+
+
+def check(name, ok, detail=""):
+    print(f"{'ok  ' if ok else 'FAIL'}  {name}" + (f"  ({detail})" if detail and (not ok or VERBOSE) else ""), flush=True)
+    if not ok:
+        FAILS.append(name)
+    return ok
+
+
+def wait_for(fn, limit=60, step=0.5):
+    end = time.time() + limit
+    while time.time() < end:
+        v = fn()
+        if v:
+            return v
+        time.sleep(step)
+    return fn()
+
+
+def flaky_rex(side):
+    """A folder whose `rex` fails every `rex block call` while the file it
+    returns exists (a second late, as a slow server's call does), and is the
+    sandbox's rex otherwise."""
+    d = os.path.join(side.box.root, "flaky")
+    os.makedirs(d)
+    flag = os.path.join(side.box.root, "rex-fails")
+    with open(os.path.join(d, "rex"), "w") as f:
+        f.write(f'#!/bin/sh\nif [ -e "{flag}" ] && [ "$1 $2" = "block call" ]; then sleep 1; echo "rex: timed out" >&2; exit 1; fi\n'
+                f'exec "{os.path.join(side.stub, "rex")}" "$@"\n')
+    os.chmod(os.path.join(d, "rex"), 0o755)
+    return d, flag
+
+
+def cases(side):
+    E = P.EXCHANGE
+    env = dict(side.env)
+    env.update(side.mux.pane_env(*side.panes_at["central"]))
+    flag = None
+    if side.rex:
+        d, flag = flaky_rex(side)
+        env["PATH"] = f"{d}:{env['PATH']}"
+    log = os.path.join(side.box.root, "watch.out")
+    with open(log, "w") as out, open(log + ".err", "w") as err:
+        p = subprocess.Popen([os.path.join(side.bin, "cbar"), "watch"], env=env, cwd=side.box.home,
+                             stdout=out, stderr=err, stdin=subprocess.DEVNULL, start_new_session=True)
+    P.CLEANUP.add("watch", lambda: p.poll() is None and os.killpg(p.pid, signal.SIGKILL))
+    text = lambda: open(log).read()
+    time.sleep(8)   # its startup report, and a look or two
+    start = len(text())
+    if flag:
+        open(flag, "w").close()
+        time.sleep(10)   # a few looks whose reads all fail
+        os.remove(flag)
+    time.sleep(8)
+    blip = text()[start:]
+    check("idle operators whose reads fail aren't stopped" if flag else "idle operators aren't stopped",
+          "stopped" not in blip, blip.strip())
+    check("nor reported again once read", blip.strip() == "", blip.strip())
+
+    # beta's Claude quits: a real stop, reported within a look or two
+    sid, pane = side.panes_at["beta"]
+    mark = len(text())
+    side.mux.send_line(sid, pane, "/exit")
+    t0 = time.time()
+    got = wait_for(lambda: "beta operator: stopped" in text()[mark:], limit=20)
+    check("a Claude that quits is stopped", got, text()[mark:].strip())
+    if got:
+        check("promptly (within 8s)", time.time() - t0 <= 8, f"{time.time() - t0:.1f}s")
+    check("alpha's operator isn't", "alpha operator" not in text()[mark:], text()[mark:].strip())
+
+    # alpha's pane closes: closed
+    asid, apane = side.panes_at["alpha"]
+    mark = len(text())
+    if side.rex:
+        side.mux("block", "close", "-s", asid, apane)
+    else:
+        side.mux("kill-pane", "-t", apane)
+    got = wait_for(lambda: "alpha operator: closed" in text()[mark:], limit=20)
+    check("a closed pane is closed", got, text()[mark:].strip())
+
+    os.killpg(p.pid, signal.SIGTERM)
+    p.wait(10)
+    err = open(log + ".err").read()
+    check("watch wrote no errors", err.strip() == "", err.strip())
+    if VERBOSE:
+        P.say("watch printed:\n" + text())
+
+
+def main():
+    global VERBOSE
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("checkout", nargs="?")
+    ap.add_argument("--rex", action="store_true")
+    ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--no-build", action="store_true")
+    ap.add_argument("-v", action="store_true")
+    ap.add_argument("-h", "--help", action="store_true")
+    a = ap.parse_args()
+    if a.help or not a.checkout:
+        print(__doc__.strip())
+        sys.exit(0 if a.help else 2)
+    VERBOSE = a.v
+
+    def stop(sig, _):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGHUP, stop)
+    root = os.path.realpath(tempfile.mkdtemp(prefix="cbwat-", dir="/tmp"))   # short: Rex sockets live here
+    C = P.CLEANUP
+    C.add("sandbox", lambda: None if a.keep else shutil.rmtree(root, ignore_errors=True))
+    C.add("leftover processes", lambda: P.reap(root))
+    try:
+        box = P.Sandbox(root, a.rex)
+        side = P.build_new(box, os.path.realpath(a.checkout), not a.no_build, a.rex)
+        P.say(f"watch: setting up ({'rex' if a.rex else 'tmux'})")
+        P.setup(side)
+        cases(side)
+        side.mux.stop()
+        n, ps, _ = P.leftovers(side)
+        check("nothing left running", n == 0, ps)
+    except KeyboardInterrupt:
+        P.say("watch: interrupted")
+        return 130
+    finally:
+        C.run()
+        if a.keep:
+            P.say(f"watch: kept the sandbox at {root}")
+    print(f"{len(FAILS)} failed ({'rex' if a.rex else 'tmux'})" if FAILS else f"all passed ({'rex' if a.rex else 'tmux'})")
+    return 1 if FAILS else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

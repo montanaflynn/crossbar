@@ -497,6 +497,37 @@ pub fn flatten(snap: Snapshot) -> Vec<Flat> {
 mod tests {
     use super::*;
 
+    /// A Claude idle (done) in a Rex pane, whose `rex block call` times out
+    /// for one look (as the live ones did, all at once, under load): 0.5.2
+    /// read that as no status, and watch printed "stopped".
+    #[test]
+    fn a_failed_read_is_not_no_status() {
+        let look = Looker::new(false);
+        let block = serde_json::json!({"block_id": "b1", "window_id": "w1", "label": "shell"});
+        let tabs: HashMap<String, String> = [("w1".to_string(), "operator".to_string())].into();
+        let proc = serde_json::json!({"foreground": {"pid": 42, "name": "2.1.316", "argv0": "claude", "cwd": "/x"}});
+        let status = serde_json::json!({"records": [{"state": "done", "msg": "ok", "updated_at": "t1", "owner": {"pid": 42, "name": "2.1.316"}}]});
+        let pane = |p: Option<Value>, s: Option<Value>, alive: bool| {
+            let (p, s) = look.rex_read("b1", p, s);
+            look.rex_pane_from("sid", "b1", &block, &tabs, &p, &s, |_| alive).unwrap()
+        };
+        let good = pane(Some(proc.clone()), Some(status.clone()), true);
+        assert_eq!((good.state.as_str(), good.owner, good.program.as_str()), ("done", Some(42), "claude"));
+        // both calls fail: the last good read stands
+        let failed = pane(None, None, true);
+        assert_eq!(failed, good);
+        // the status record's owner has exited: stale, whether read now or not
+        let ended = pane(None, None, false);
+        assert_eq!((ended.state.as_str(), ended.owner), ("", None));
+        // Rex answers with no records: no status
+        let none = pane(Some(proc), Some(serde_json::json!({"records": []})), true);
+        assert_eq!((none.state.as_str(), none.owner), ("", None));
+        // a Looker that looks once has nothing to fall back on
+        let once = Looker::new(false);
+        let (p, s) = once.rex_read("b1", None, None);
+        assert_eq!(once.rex_pane_from("sid", "b1", &block, &tabs, &p, &s, |_| true).unwrap().state, "");
+    }
+
     #[test]
     fn tells_boards_apart() {
         let v = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();

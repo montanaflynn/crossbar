@@ -276,6 +276,73 @@ pub fn watch(home: &Home, scope: &str, label: &str) {
 mod tests {
     use super::*;
 
+    fn look(panes: &[(&str, &str, &str, Option<i64>)]) -> HashMap<String, Report> {
+        panes
+            .iter()
+            .map(|(key, state, msg, owner)| {
+                let r = Report { name: format!("{key} operator"), state: state.to_string(), kind: String::new(), msg: msg.to_string(), since: "t1".into(), owner: *owner };
+                (key.to_string(), r)
+            })
+            .collect()
+    }
+
+    fn events(e: Vec<(Report, String)>) -> Vec<String> {
+        let mut v: Vec<String> = e.into_iter().map(|(r, s)| line(&r.name, &s, &r.kind, &r.msg)).collect();
+        v.sort();
+        v
+    }
+
+    /// The live false stop: two idle (done) operators whose state reads as
+    /// nothing for one look (their reads timed out) while their Claudes run.
+    #[test]
+    fn a_blank_look_is_not_a_stop() {
+        let mut t = Tracker::new(Duration::from_secs(8));
+        let now = Instant::now();
+        let alive = |_: i64| true;
+        let idle = look(&[("grail", "done", "ok", Some(1)), ("crossbar", "done", "ok", Some(2))]);
+        assert!(t.step(&idle, now, &alive).is_empty());
+        let blank = look(&[("grail", "", "", None), ("crossbar", "", "", None)]);
+        for _ in 0..3 {
+            assert_eq!(events(t.step(&blank, now, &alive)), Vec::<String>::new());
+        }
+        // and back, as it was: nothing new, so nothing printed again
+        assert!(t.step(&idle, now, &alive).is_empty());
+    }
+
+    #[test]
+    fn a_real_stop_is_reported_at_once() {
+        let mut t = Tracker::new(Duration::from_secs(8));
+        let now = Instant::now();
+        t.step(&look(&[("grail", "done", "ok", Some(1)), ("crossbar", "idle", "", Some(2))]), now, &|_| true);
+        // grail's Claude exited; crossbar's runs, its status gone for now
+        let blank = look(&[("grail", "", "", None), ("crossbar", "", "", None)]);
+        assert_eq!(events(t.step(&blank, now, &|pid| pid != 1)), vec!["grail operator: stopped"]);
+        assert!(t.step(&blank, now, &|pid| pid != 1).is_empty());
+        // crossbar's Claude exits later: reported then
+        assert_eq!(events(t.step(&blank, now, &|_| false)), vec!["crossbar operator: stopped"]);
+        // a new Claude in grail's pane reports again
+        let back = look(&[("grail", "done", "again", Some(3)), ("crossbar", "", "", None)]);
+        assert_eq!(events(t.step(&back, now, &|_| true)), vec!["grail operator: done — again"]);
+        // closed: missing from two looks in a row
+        let gone = look(&[("crossbar", "", "", None)]);
+        assert!(t.step(&gone, now, &|_| true).is_empty());
+        assert_eq!(events(t.step(&gone, now, &|_| true)), vec!["grail operator: closed — again"]);
+    }
+
+    #[test]
+    fn without_an_owner_two_blank_looks_are_a_stop() {
+        let mut t = Tracker::new(Duration::from_secs(8));
+        let now = Instant::now();
+        t.step(&look(&[("a", "working", "", None)]), now, &|_| true);
+        let blank = look(&[("a", "", "", None)]);
+        assert!(t.step(&blank, now, &|_| true).is_empty());
+        assert_eq!(events(t.step(&blank, now, &|_| true)), vec!["a operator: stopped"]);
+        // one blank look between two states is nothing
+        t.step(&look(&[("a", "working", "", None)]), now, &|_| true);
+        assert!(t.step(&blank, now, &|_| true).is_empty());
+        assert_eq!(events(t.step(&look(&[("a", "done", "x", None)]), now, &|_| true)), vec!["a operator: done — x"]);
+    }
+
     #[test]
     fn remembers_what_it_printed() {
         let path = std::env::temp_dir().join(format!("cbar-watch-{}/x.json", std::process::id()));

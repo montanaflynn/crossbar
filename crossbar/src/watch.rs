@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::layout::{Home, OPERATOR, SEP};
 use crate::status::{Looker, Pane};
+use crate::util;
 
 const REPORTABLE: [&str; 3] = ["done", "blocked", "error"];
 /// Reported at every startup; the others only when not seen before.
@@ -31,6 +32,8 @@ struct Report {
     kind: String,
     msg: String,
     since: String,
+    /// The pid of the process that reported the state, if known.
+    owner: Option<i64>,
 }
 
 /// What a watch last printed about a report.
@@ -47,7 +50,7 @@ fn reports(look: &Looker, home: &Home, scope: &str, label: &str) -> HashMap<Stri
     let mut found = HashMap::new();
     let mut add = |name: String, p: &Pane| {
         if p.program != "switchboard" && p.label != "switchboard" {
-            let r = Report { name, state: p.state.clone(), kind: p.kind.clone(), msg: p.msg.clone(), since: p.since_at.clone() };
+            let r = Report { name, state: p.state.clone(), kind: p.kind.clone(), msg: p.msg.clone(), since: p.since_at.clone(), owner: p.owner };
             found.insert(p.block_id.clone(), r);
         }
     };
@@ -127,12 +130,114 @@ fn line(name: &str, state: &str, kind: &str, msg: &str) -> String {
     format!("{name}: {state}{kind}{msg}")
 }
 
-/// Watch forever, printing events. A report without a message waits up to
-/// WAIT_MSG for one (Rex sends the summary just after the state); a pane
-/// must be missing from two looks in a row to count as closed.
+/// What a watch remembers between looks, and the events each look makes.
+///
+/// A report without a message waits up to WAIT_MSG for one (Rex sends the
+/// summary just after the state); a pane must be missing from two looks in a
+/// row to count as closed. A report whose state is gone counts as stopped
+/// only once the process that reported it has exited (or, if nobody knows
+/// which process that was, after two looks in a row without a state): while
+/// it runs, its Claude is still there, and a look that found no state was a
+/// read that failed or a status Rex dropped, not a stop.
+struct Tracker {
+    last: HashMap<String, Report>,
+    pending: HashMap<String, Instant>,
+    missing: HashMap<String, u32>,
+    blank: HashMap<String, u32>,
+    first: bool,
+    wait_msg: Duration,
+}
+
+impl Tracker {
+    fn new(wait_msg: Duration) -> Tracker {
+        Tracker {
+            last: HashMap::new(),
+            pending: HashMap::new(),
+            missing: HashMap::new(),
+            blank: HashMap::new(),
+            first: true,
+            wait_msg,
+        }
+    }
+
+    /// The events of the look CUR at NOW: (report, the state to print).
+    /// ALIVE says whether a pid still runs.
+    fn step(&mut self, cur: &HashMap<String, Report>, now: Instant, alive: &dyn Fn(i64) -> bool) -> Vec<(Report, String)> {
+        let mut events = Vec::new();
+        let first = self.first;
+        self.first = false;
+        for (key, r) in cur {
+            self.missing.remove(key);
+            let prev = self.last.get(key).cloned();
+            if r.state.is_empty() {
+                match &prev {
+                    None => continue, // not an agent (yet)
+                    Some(p) if !p.state.is_empty() => {
+                        let ended = match p.owner {
+                            Some(pid) => !alive(pid),
+                            None => {
+                                let n = self.blank.entry(key.clone()).or_insert(0);
+                                *n += 1;
+                                *n >= 2
+                            }
+                        };
+                        if !ended {
+                            continue; // its Claude still runs: keep what we knew
+                        }
+                        self.blank.remove(key);
+                        self.pending.remove(key);
+                        self.last.insert(key.clone(), r.clone());
+                        events.push((r.clone(), "stopped".into()));
+                        continue;
+                    }
+                    Some(_) => {}
+                }
+            }
+            self.blank.remove(key);
+            self.last.insert(key.clone(), r.clone());
+            if first || prev.as_ref().is_some_and(|p| (&p.state, &p.msg) == (&r.state, &r.msg)) {
+                continue;
+            }
+            self.pending.remove(key);
+            if REPORTABLE.contains(&r.state.as_str()) {
+                if !r.msg.is_empty() || prev.as_ref().is_some_and(|p| p.state == r.state) {
+                    events.push((r.clone(), r.state.clone()));
+                } else {
+                    self.pending.insert(key.clone(), now);
+                }
+            }
+        }
+        for (key, since) in self.pending.clone() {
+            let r = self.last[&key].clone();
+            if !REPORTABLE.contains(&r.state.as_str()) {
+                self.pending.remove(&key);
+            } else if !r.msg.is_empty() || now.duration_since(since) >= self.wait_msg {
+                self.pending.remove(&key);
+                events.push((r.clone(), r.state.clone()));
+            }
+        }
+        let gone: Vec<String> = self.last.keys().filter(|k| !cur.contains_key(*k)).cloned().collect();
+        for key in gone {
+            let n = self.missing.entry(key.clone()).or_insert(0);
+            *n += 1;
+            if *n >= 2 {
+                let r = self.last[&key].clone();
+                if !first {
+                    events.push((r, "closed".into()));
+                }
+                self.last.remove(&key);
+                self.missing.remove(&key);
+                self.pending.remove(&key);
+                self.blank.remove(&key);
+            }
+        }
+        events
+    }
+}
+
+/// Watch forever, printing events (see Tracker).
 pub fn watch(home: &Home, scope: &str, label: &str) {
     let every = Duration::from_secs(3);
-    let wait_msg = Duration::from_secs(8);
     let look = Looker::new(true);
     let mut ledger = Ledger::load(seen_file(home, label));
     let mut out = std::io::stdout();
@@ -145,14 +250,12 @@ pub fn watch(home: &Home, scope: &str, label: &str) {
             _ => ledger.printed(r),
         }
     };
-    let mut last: HashMap<String, Report> = HashMap::new();
-    let mut pending: HashMap<String, Instant> = HashMap::new();
-    let mut missing: HashMap<String, u32> = HashMap::new();
-    let mut first = true;
+    let mut tracker = Tracker::new(Duration::from_secs(8));
+    let alive = |pid: i64| util::alive(&pid.to_string());
     loop {
         let now = Instant::now();
         let cur = reports(&look, home, scope, label);
-        if first {
+        if tracker.first {
             // what stands now: blocked and error always, the rest if new
             let mut now_reports: Vec<&Report> = cur.values().filter(|r| REPORTABLE.contains(&r.state.as_str())).collect();
             now_reports.sort_by(|a, b| a.name.cmp(&b.name));
@@ -162,51 +265,9 @@ pub fn watch(home: &Home, scope: &str, label: &str) {
                 }
             }
         }
-        for (key, r) in &cur {
-            missing.remove(key);
-            let prev = last.get(key).cloned();
-            if r.state.is_empty() && prev.is_none() {
-                continue; // not an agent (yet)
-            }
-            last.insert(key.clone(), r.clone());
-            if first || prev.as_ref().is_some_and(|p| (&p.state, &p.msg) == (&r.state, &r.msg)) {
-                continue;
-            }
-            pending.remove(key);
-            if REPORTABLE.contains(&r.state.as_str()) {
-                if !r.msg.is_empty() || prev.as_ref().is_some_and(|p| p.state == r.state) {
-                    say(&mut ledger, r, &r.state);
-                } else {
-                    pending.insert(key.clone(), now);
-                }
-            } else if r.state.is_empty() && prev.as_ref().is_some_and(|p| !p.state.is_empty()) {
-                say(&mut ledger, r, "stopped");
-            }
+        for (r, state) in tracker.step(&cur, now, &alive) {
+            say(&mut ledger, &r, &state);
         }
-        for (key, since) in pending.clone() {
-            let r = last[&key].clone();
-            if !REPORTABLE.contains(&r.state.as_str()) {
-                pending.remove(&key);
-            } else if !r.msg.is_empty() || now.duration_since(since) >= wait_msg {
-                pending.remove(&key);
-                say(&mut ledger, &r, &r.state);
-            }
-        }
-        let gone: Vec<String> = last.keys().filter(|k| !cur.contains_key(*k)).cloned().collect();
-        for key in gone {
-            let n = missing.entry(key.clone()).or_insert(0);
-            *n += 1;
-            if *n >= 2 {
-                let r = last[&key].clone();
-                if !first {
-                    say(&mut ledger, &r, "closed");
-                }
-                last.remove(&key);
-                missing.remove(&key);
-                pending.remove(&key);
-            }
-        }
-        first = false;
         std::thread::sleep(every);
     }
 }
@@ -218,7 +279,7 @@ mod tests {
     #[test]
     fn remembers_what_it_printed() {
         let path = std::env::temp_dir().join(format!("cbar-watch-{}/x.json", std::process::id()));
-        let r = Report { name: "fix-x".into(), state: "done".into(), kind: "".into(), msg: "ok".into(), since: "t1".into() };
+        let r = Report { name: "fix-x".into(), state: "done".into(), kind: "".into(), msg: "ok".into(), since: "t1".into(), owner: None };
         let mut l = Ledger::load(path.clone());
         assert!(!l.knows(&r));
         l.printed(&r);

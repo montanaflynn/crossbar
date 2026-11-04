@@ -534,8 +534,39 @@ fn cmd_up(home: &Home, args: Vec<String>) {
     }
 }
 
-/// Start session NAME if it's missing; if it runs, start ROLE in its tab
-/// ROLE when that tab is missing or only has a shell. ALL holds the panes.
+/// Whether pane P only has a shell: no Claude status, a shell in front.
+fn only_shell(p: &status::Pane) -> bool {
+    p.state.is_empty() && SHELLS.contains(&p.program.as_str())
+}
+
+/// What `cbar up` does about a running session's switchboard.
+#[derive(Debug, PartialEq)]
+enum BoardFix {
+    /// A switchboard runs in the session: leave it.
+    Running,
+    /// There is none: add one next to the supervisor or operator.
+    Start,
+    /// Its pane (this one) only has a shell: start the board in it again.
+    Respawn(String),
+}
+
+/// The fix for the switchboard among MINE (a session's panes), which
+/// belongs in tab ROLE.
+fn board_fix(mine: &[&Flat], role: &str) -> BoardFix {
+    let boards: Vec<&&Flat> = mine.iter().filter(|f| f.pane.label == "switchboard").collect();
+    if boards.iter().any(|f| !only_shell(&f.pane)) {
+        return BoardFix::Running;
+    }
+    match boards.iter().find(|f| f.pane.tab == role).or(boards.first()) {
+        Some(f) => BoardFix::Respawn(f.pane.block_id.clone()),
+        None => BoardFix::Start,
+    }
+}
+
+/// Start session NAME if it's missing. If it runs, start ROLE in its tab
+/// ROLE when that tab is missing or only has a shell, and its switchboard
+/// when it has none or the board's pane only has a shell (the same layout
+/// as `cbar new`). What runs is left alone. ALL holds the panes.
 fn up_one(all: &[Flat], name: &str, dir: &str, term: Term, role: &str, path: &str) {
     if !mux::session_running(name, term) {
         let made = if role == SUPERVISOR { start_exchange(name, dir, term) } else { start_project(name, dir, term) };
@@ -545,32 +576,70 @@ fn up_one(all: &[Flat], name: &str, dir: &str, term: Term, role: &str, path: &st
         return;
     }
     let mine: Vec<&Flat> = all.iter().filter(|f| f.group == name && f.mux == term.as_str()).collect();
+    let session = match term {
+        Term::Rex => mine.first().map(|g| g.pane.session_id.clone()).or_else(|| mux::rex_session_id(name)).unwrap_or_default(),
+        Term::Tmux => name.to_string(),
+    };
     let pane = mine.iter().find(|f| f.pane.tab == role && f.pane.label != "switchboard");
     let argv = pane_argv(&[role, path]);
-    match pane {
-        None => match mux::new_tab(term, name, role, dir, &argv) {
-            Ok(m) => {
-                // its switchboard went with the tab: put one back next to it
-                if !mine.iter().any(|f| f.pane.tab == role) {
-                    let session = if term == Term::Rex { mux::rex_session_id(name).unwrap_or_default() } else { name.to_string() };
-                    if let Err(err) = mux::split(term, &session, &m.pane, dir, 30, false, "switchboard", &pane_argv(&["board", path])) {
-                        util::warn(format!("{name}: could not add the switchboard pane: {err}"));
-                    }
+    let board_argv = pane_argv(&["board", path]);
+    let fix = board_fix(&mine, role);
+    let mut did = false;
+    // the board next to PANE: added, or started again in its pane; its pane after
+    let board = |next_to: &str| -> Option<String> {
+        match &fix {
+            BoardFix::Running => None,
+            BoardFix::Start => match mux::split(term, &session, next_to, dir, 30, false, "switchboard", &board_argv) {
+                Ok(m) => {
+                    println!("{name}: started its switchboard");
+                    Some(m.pane)
                 }
+                Err(err) => {
+                    util::warn(format!("{name}: could not add the switchboard pane: {err}"));
+                    None
+                }
+            },
+            BoardFix::Respawn(b) => match mux::replace(term, &session, b, dir, "switchboard", &board_argv) {
+                Ok(p) => {
+                    println!("{name}: started its switchboard again (its pane had only a shell)");
+                    Some(p)
+                }
+                Err(err) => {
+                    util::warn(format!("{name}: could not start its switchboard: {err}"));
+                    None
+                }
+            },
+        }
+    };
+    match pane {
+        None => match mux::new_tab(term, &session, role, dir, &argv) {
+            Ok(m) => {
                 println!("{name}: started its {role} in a new tab");
+                did = true;
+                board(&m.pane);
             }
             Err(err) => util::warn(format!("{name}: could not open a {role} tab: {err}")),
         },
-        Some(f) if f.pane.state.is_empty() && SHELLS.contains(&f.pane.program.as_str()) => {
-            let neighbor = mine.iter().find(|g| g.pane.window_id == f.pane.window_id && g.pane.block_id != f.pane.block_id);
-            let session = mine.first().map(|g| g.pane.session_id.clone()).unwrap_or_default();
-            let target_session = if term == Term::Rex { session.as_str() } else { name };
-            match mux::respawn(term, target_session, &f.pane.block_id, &f.pane.window_id, neighbor.map(|g| g.pane.block_id.as_str()), role, dir, 70, &argv) {
-                Ok(()) => println!("{name}: started its {role}"),
-                Err(err) => util::warn(format!("{name}: could not start its {role}: {err}")),
+        Some(f) => {
+            // the board first: in Rex the operator's pane is opened next to it
+            let new_board = board(&f.pane.block_id);
+            did |= fix != BoardFix::Running;
+            if only_shell(&f.pane) {
+                let neighbor = new_board.or_else(|| {
+                    mine.iter()
+                        .find(|g| g.pane.window_id == f.pane.window_id && g.pane.block_id != f.pane.block_id)
+                        .map(|g| g.pane.block_id.clone())
+                });
+                match mux::respawn(term, &session, &f.pane.block_id, &f.pane.window_id, neighbor.as_deref(), role, dir, 70, &argv) {
+                    Ok(()) => println!("{name}: started its {role}"),
+                    Err(err) => util::warn(format!("{name}: could not start its {role}: {err}")),
+                }
+                did = true;
             }
         }
-        Some(_) => println!("{name}: running"),
+    }
+    if !did {
+        println!("{name}: running");
     }
 }
 
@@ -1271,5 +1340,56 @@ fn cmd_update(home: &Home) {
         println!("already up to date: {new}");
     } else {
         println!("updated: {old} → {new}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn flat(tab: &str, label: &str, program: &str, state: &str, id: &str) -> Flat {
+        Flat {
+            mux: "rex".into(),
+            group: "central".into(),
+            pane: status::Pane {
+                session_id: "s".into(),
+                block_id: id.into(),
+                window_id: "w".into(),
+                tab: tab.into(),
+                label: label.into(),
+                program: program.into(),
+                cwd: "~".into(),
+                state: state.into(),
+                kind: String::new(),
+                msg: String::new(),
+                since: String::new(),
+                since_at: String::new(),
+                owner: None,
+            },
+        }
+    }
+
+    /// `cbar up` and a session's switchboard: the live case was a main board
+    /// whose pane had dropped to zsh, which up reported as running.
+    #[test]
+    fn up_restarts_a_missing_or_dropped_board() {
+        let sup = flat("supervisor", "shell", "claude", "idle", "b1");
+        let board = flat("supervisor", "switchboard", "switchboard", "", "b2");
+        let dropped = flat("supervisor", "switchboard", "zsh", "", "b2");
+        let fix = |v: Vec<&Flat>| board_fix(&v, "supervisor");
+        assert_eq!(fix(vec![&sup, &board]), BoardFix::Running);
+        assert_eq!(fix(vec![&sup, &dropped]), BoardFix::Respawn("b2".into()));
+        assert_eq!(fix(vec![&sup]), BoardFix::Start);
+        // a board that runs anywhere in the session is left alone
+        let elsewhere = flat("notes", "switchboard", "switchboard", "", "b3");
+        assert_eq!(fix(vec![&sup, &dropped, &elsewhere]), BoardFix::Running);
+        // a dropped one in the supervisor's tab is the one started again
+        let other_dropped = flat("notes", "switchboard", "sh", "", "b4");
+        assert_eq!(fix(vec![&sup, &other_dropped, &dropped]), BoardFix::Respawn("b2".into()));
+        // an unknown program (a failed read) isn't a shell: leave it
+        let unknown = flat("supervisor", "switchboard", "?", "", "b2");
+        assert_eq!(fix(vec![&sup, &unknown]), BoardFix::Running);
+        // and a Claude whose state shows isn't only a shell
+        assert!(!only_shell(&sup.pane) && only_shell(&dropped.pane));
     }
 }

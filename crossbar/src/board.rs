@@ -1321,6 +1321,54 @@ mod tests {
         (Group { session_id: label.into(), label: label.into(), mux: "rex".into(), window_id: None }, Vec::new())
     }
 
+    /// The live drop: the Rex app sent the board a mouse or focus report
+    /// that arrived as a lone ESC and then the rest. Esc quit the board.
+    #[test]
+    fn a_split_escape_sequence_is_not_keys() {
+        let t0 = Instant::now();
+        let at = |ms| t0 + Duration::from_millis(ms);
+        let none = KeyModifiers::NONE;
+        let mut s = Stray::default();
+        assert!(!s.admit(KeyCode::Esc, none, at(0)));
+        // ESC [ < 3 5 ; 5 ; 3 M: none of the tail are keys (3 and 5 would jump)
+        for (i, c) in "[<35;5;3M".chars().enumerate() {
+            assert!(!s.admit(KeyCode::Char(c), none, at(1 + i as u64)), "{c}");
+        }
+        // a key well after is one
+        assert!(s.admit(KeyCode::Char('j'), none, at(400)));
+        assert!(s.admit(KeyCode::Char('3'), none, at(401)));
+        // a key that isn't a character right after Esc still counts
+        assert!(!s.admit(KeyCode::Esc, none, at(500)));
+        assert!(s.admit(KeyCode::Down, none, at(501)));
+        // alt-x (ESC x in one read) isn't Esc
+        let mut s = Stray::default();
+        assert!(s.admit(KeyCode::Char('x'), KeyModifiers::ALT, at(0)));
+    }
+
+    #[test]
+    fn quits_on_q_and_ctrl_c_not_esc() {
+        let mut b = Board {
+            view: View::Exchange("central".into()),
+            exchange: "central".into(),
+            default: "central".into(),
+            exchanges: vec!["central".into()],
+            shared: Arc::new(Mutex::new(Shared { data: Vec::new(), client: None, main: None, status: None })),
+            look: Arc::new(Looker::new(false)),
+            selected: None,
+            targets: Vec::new(),
+            offset: 0,
+            last_index: 0,
+            focus_in: None,
+            link_hover: false,
+            link_at: None,
+            cols: 80,
+        };
+        let none = KeyModifiers::NONE;
+        assert_eq!(b.key(KeyCode::Esc, none, &Vec::new()), None);
+        assert_eq!(b.key(KeyCode::Char('q'), none, &Vec::new()), Some("q pressed"));
+        assert_eq!(b.key(KeyCode::Char('c'), KeyModifiers::CONTROL, &Vec::new()), Some("ctrl-c pressed"));
+    }
+
     #[test]
     fn spinner_follows_the_clock() {
         let ms = |n| spin_tick(Duration::from_millis(n));

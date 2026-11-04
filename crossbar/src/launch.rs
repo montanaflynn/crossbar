@@ -211,5 +211,17 @@ mod tests {
         assert_eq!(show(&v(&["tmux", "-L", "x", "attach-session", "-t", "=central/alpha"])), "tmux -L x attach-session -t '=central/alpha'");
         assert_eq!(show(&v(&["a=b", "~/x", "it's", "*", "$HOME", "", "%3", "@1"])), r"a=b '~/x' 'it'\''s' '*' '$HOME' '' %3 @1");
     }
+
+    /// What `cbar run --pane board` says when the board ends: nothing for a
+    /// plain exit (the board said why itself), else how it ended.
+    #[test]
+    fn says_how_a_program_ended() {
+        let exit = |c: i32| c << 8; // a wait status, as waitpid fills it in
+        assert_eq!(ended(exit(0)), None);
+        assert_eq!(ended(exit(1)).as_deref(), Some("exit status 1"));
+        assert_eq!(ended(libc::SIGKILL).as_deref(), Some("killed by SIGKILL"));
+        assert_eq!(ended(libc::SIGABRT).as_deref(), Some("killed by SIGABRT (it crashed)"));
+        assert_eq!(ended(libc::SIGUSR1).as_deref(), Some(format!("killed by signal {}", libc::SIGUSR1).as_str()));
+    }
 }
 

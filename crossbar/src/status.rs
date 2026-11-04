@@ -331,6 +331,11 @@ impl Looker {
             }
         }
         let panes = parallel(&jobs, |(sid, b, tabs)| self.rex_pane(sid, b, tabs));
+        // forget the last reads of blocks that are gone
+        if !sessions.is_empty() {
+            let placed: HashSet<&str> = jobs.iter().filter_map(|(_, b, _)| b["block_id"].as_str()).collect();
+            self.rex_last.lock().unwrap().retain(|k, _| placed.contains(k.as_str()));
+        }
         let mut out: Snapshot = sessions
             .iter()
             .map(|(sid, label)| (Group { session_id: sid.clone(), label: label.clone(), mux: "rex".into(), window_id: None }, Vec::new()))

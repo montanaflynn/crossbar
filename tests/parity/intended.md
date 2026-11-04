@@ -1133,14 +1133,14 @@ Any diff. As tail-chat: 0.4 typed the agent's command line into a shell, so it s
 
 ## version
 
-The Rust cbar knows its own version (VERSION is 0.5.3); 0.4 only read ~/.crossbar/version.
+The Rust cbar knows its own version (VERSION is 0.5.4); 0.4 only read ~/.crossbar/version.
 
 ```diff
 --- old
 +++ new
 @@ -1,2 +1,2 @@
 -unknown (not installed by install)
-+0.5.3 (not installed by install)
++0.5.4 (not installed by install)
  --- exit 0
 ```
 

@@ -475,7 +475,10 @@ fn cmd_run(home: &Home, mut args: Vec<String>) {
                 Node::Exchange(e) | Node::Agent { exchange: e, project: None, .. } => argv.extend(["--exchange".to_string(), e.clone()]),
                 Node::Root => {}
             }
-            launch::run(&argv, &[], pane)
+            // the board says why it exits; this catches what it can't (a kill, a crash)
+            let (who, at) = crate::board::log_names(&argv[1..]);
+            let log = crate::board::log_path(home);
+            launch::run_noting(&argv, &[], pane, Some((&log, &format!("{who} [{at}]"))))
         }
         _ => die(format!("usage: {usage}")),
     }

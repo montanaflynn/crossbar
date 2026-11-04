@@ -79,6 +79,35 @@ fn set_job_signals(action: libc::sighandler_t) {
 /// this process. With PANE it runs as the terminal's foreground job, and
 /// when it ends this process becomes your login shell.
 pub fn run(argv: &[String], envs: &[(String, String)], pane: bool) -> ! {
+    run_noting(argv, envs, pane, None)
+}
+
+/// How a process ended, from its wait status: None for a plain exit 0.
+pub fn ended(st: libc::c_int) -> Option<String> {
+    if libc::WIFSIGNALED(st) {
+        let sig = libc::WTERMSIG(st);
+        let name = match sig {
+            libc::SIGHUP => "SIGHUP",
+            libc::SIGINT => "SIGINT",
+            libc::SIGKILL => "SIGKILL",
+            libc::SIGTERM => "SIGTERM",
+            libc::SIGABRT => "SIGABRT (it crashed)",
+            libc::SIGSEGV => "SIGSEGV (it crashed)",
+            libc::SIGBUS => "SIGBUS (it crashed)",
+            _ => "",
+        };
+        Some(if name.is_empty() { format!("killed by signal {sig}") } else { format!("killed by {name}") })
+    } else if libc::WIFEXITED(st) && libc::WEXITSTATUS(st) != 0 {
+        Some(format!("exit status {}", libc::WEXITSTATUS(st)))
+    } else {
+        None
+    }
+}
+
+/// run; with PANE, when the program ends other than by a plain exit (it was
+/// killed, crashed or failed), also say so on the pane and in the log LOG
+/// (its path, and how its line names the program) before the shell starts.
+pub fn run_noting(argv: &[String], envs: &[(String, String)], pane: bool, log: Option<(&std::path::Path, &str)>) -> ! {
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
     for (k, v) in envs {
@@ -103,9 +132,9 @@ pub fn run(argv: &[String], envs: &[(String, String)], pane: bool) -> ! {
         Ok(child) => {
             let pid = child.id() as libc::pid_t;
             unsafe { libc::tcsetpgrp(0, pid) };
+            let mut st = 0;
             loop {
-                let mut st = 0;
-                let r = unsafe { libc::waitpid(pid, &mut st, libc::WUNTRACED) };
+                let r =unsafe { libc::waitpid(pid, &mut st, libc::WUNTRACED) };
                 if r < 0 {
                     if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                         continue;
@@ -119,6 +148,10 @@ pub fn run(argv: &[String], envs: &[(String, String)], pane: bool) -> ! {
                         libc::kill(-pid, libc::SIGCONT);
                     }
                     continue;
+                }
+                if let (Some((path, who)), Some(how)) = (log, ended(st)) {
+                    util::append_log(path, &format!("{} {who} (pid {pid}): {how}", util::local_iso_now()));
+                    util::warn(format!("{}: {how}", util::basename(&argv[0])));
                 }
                 break;
             }

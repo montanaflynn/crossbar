@@ -23,7 +23,7 @@
 //!
 //! Keys:  j/k ↑/↓ select · J/K tab/shift-tab next/prev session · g/G first/last
 //!        enter jump to pane · 1-9 jump to session N · a this exchange / all
-//!        exchanges · q/esc quit (scoped to one session, "session" above means
+//!        exchanges · q quit (scoped to one session, "session" above means
 //!        tab; 0/~ jumps to the exchange's main switchboard)
 //! Mouse: click a row to jump to that pane, click a card header to jump to that
 //!        session, wheel moves the selection; scoped, click "↖ <exchange>" in
@@ -36,7 +36,9 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -44,7 +46,7 @@ use ratatui::crossterm::event::{
     self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEventKind,
     KeyModifiers, MouseButton, MouseEventKind,
 };
-use ratatui::crossterm::execute;
+use ratatui::crossterm::{cursor, execute};
 use ratatui::crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
@@ -816,11 +818,11 @@ impl Board {
         self.activate(t);
     }
 
-    /// Handle a key; false to quit.
-    fn key(&mut self, code: KeyCode, mods: KeyModifiers, data: &Snapshot) -> bool {
+    /// Handle a key; Some(why) to quit. Esc doesn't quit: see Stray.
+    fn key(&mut self, code: KeyCode, mods: KeyModifiers, data: &Snapshot) -> Option<&'static str> {
         match code {
-            KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => return false,
-            KeyCode::Char('q') | KeyCode::Esc => return false,
+            KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => return Some("ctrl-c pressed"),
+            KeyCode::Char('q') => return Some("q pressed"),
             KeyCode::Char('j') | KeyCode::Down => self.step(1),
             KeyCode::Char('k') | KeyCode::Up => self.step(-1),
             KeyCode::Char('J') | KeyCode::Tab | KeyCode::Right | KeyCode::PageDown => self.hop(1),
@@ -849,6 +851,41 @@ impl Board {
             }
             _ => {}
         }
+        None
+    }
+}
+
+/// Keys that are really the rest of an escape sequence. The board turns on
+/// mouse and focus reports, so the terminal sends it sequences such as
+/// ESC [ < 35 ; 5 ; 3 M as the mouse moves. When one reaches it in two reads,
+/// crossterm reads the lone ESC as the Esc key and the rest as typed keys
+/// (`[`, `<`, `3`, `5`…, and a digit jumps to a session). Esc used to quit:
+/// that is how a main board in a pane the Rex app was showing dropped to a
+/// shell. Now Esc does nothing, and the characters that closely follow it
+/// are dropped.
+#[derive(Default)]
+struct Stray {
+    esc_at: Option<Instant>,
+}
+
+impl Stray {
+    /// How soon after an Esc (or a dropped character) a character counts as
+    /// part of its sequence.
+    const WINDOW: Duration = Duration::from_millis(250);
+
+    /// Whether key CODE (with MODS) at NOW is one to act on.
+    fn admit(&mut self, code: KeyCode, mods: KeyModifiers, now: Instant) -> bool {
+        if code == KeyCode::Esc && mods.is_empty() {
+            self.esc_at = Some(now);
+            return false;
+        }
+        if let (Some(t), KeyCode::Char(_)) = (self.esc_at, code) {
+            if now.saturating_duration_since(t) < Self::WINDOW {
+                self.esc_at = Some(now);
+                return false;
+            }
+        }
+        self.esc_at = None;
         true
     }
 }
@@ -879,24 +916,80 @@ fn jump_to(shared: &Arc<Mutex<Shared>>, sid: &str, wid: Option<&str>, bid: Optio
 }
 
 static QUIT: AtomicBool = AtomicBool::new(false);
+/// The signal that asked the board to quit.
+static SIGNAL: AtomicI32 = AtomicI32::new(0);
 
-extern "C" fn on_quit(_: libc::c_int) {
+extern "C" fn on_quit(sig: libc::c_int) {
+    SIGNAL.store(sig, Ordering::Relaxed);
     QUIT.store(true, Ordering::Relaxed);
+}
+
+fn signal_reason(sig: libc::c_int) -> String {
+    match sig {
+        libc::SIGHUP => "SIGHUP (its terminal hung up)".into(),
+        libc::SIGTERM => "SIGTERM".into(),
+        n => format!("signal {n}"),
+    }
+}
+
+// ---- why it exits ----------------------------------------------------------------
+
+/// Where a live board logs its start and its exit, and how it names itself
+/// there (its argv and its pane).
+static EXIT_LOG: OnceLock<(PathBuf, String, String)> = OnceLock::new();
+
+/// The switchboards' log: ~/.crossbar/logs/switchboard.log.
+pub fn log_path(home: &Home) -> PathBuf {
+    home.root.join("logs").join("switchboard.log")
+}
+
+/// A line of that log: TIME ARGV [PANE] (pid N): WHAT.
+pub fn log_line(argv: &str, pane: &str, pid: u32, what: &str) -> String {
+    format!("{} {argv} [{pane}] (pid {pid}): {what}", util::local_iso_now())
+}
+
+/// How the log names a board run with ARGS here: its argv and its pane.
+pub fn log_names(args: &[String]) -> (String, String) {
+    let argv = std::iter::once("switchboard".to_string()).chain(args.iter().cloned()).collect::<Vec<_>>().join(" ");
+    let at = match mux::here_pane() {
+        Some(p) if mux::is_tmux_id(&p) => format!("tmux {p}"),
+        Some(p) => format!("rex {p}"),
+        None => "no pane".into(),
+    };
+    (argv, at)
+}
+
+fn note(what: &str) {
+    if let Some((path, argv, pane)) = EXIT_LOG.get() {
+        util::append_log(path, &log_line(argv, pane, std::process::id(), what));
+    }
+}
+
+/// Log why the board exits, and say it on the pane, so a board that drops
+/// to a shell is never silent.
+fn farewell(why: &str) {
+    note(&format!("exited: {why}"));
+    eprintln!("switchboard: exited: {why}");
 }
 
 fn terminal_size() -> (u16, u16) {
     terminal::size().unwrap_or((80, 24))
 }
 
-/// Whether this board's pane is gone: its terminal hung up or no longer
-/// answers, or the process that started it (the pane's shell or cbar) died.
-fn pane_gone(parent: libc::pid_t) -> bool {
+/// Why this board's pane is gone, if it is: its terminal hung up or no
+/// longer answers, or the process that started it (the pane's shell or cbar)
+/// died.
+fn pane_gone(parent: libc::pid_t) -> Option<String> {
     unsafe {
-        if libc::getppid() != parent || libc::tcgetpgrp(0) < 0 {
-            return true;
+        if libc::getppid() != parent {
+            return Some(format!("its parent (pid {parent}) exited"));
+        }
+        if libc::tcgetpgrp(0) < 0 {
+            return Some("its terminal is gone".into());
         }
         let mut fd = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
-        libc::poll(&mut fd, 1, 0) > 0 && fd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
+        (libc::poll(&mut fd, 1, 0) > 0 && fd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0)
+            .then(|| "its terminal hung up".into())
     }
 }
 
@@ -908,13 +1001,15 @@ fn watchdog() {
         let mut asked: Option<Instant> = None;
         loop {
             std::thread::sleep(Duration::from_millis(250));
-            if pane_gone(parent) {
+            if let Some(why) = pane_gone(parent) {
+                farewell(&why);
                 unsafe { libc::_exit(0) };
             }
             if QUIT.load(Ordering::Relaxed) {
                 // give the main loop a moment to put the terminal back
                 let t = *asked.get_or_insert_with(Instant::now);
                 if t.elapsed() > Duration::from_secs(1) {
+                    farewell(&format!("{}; its main loop didn't stop", signal_reason(SIGNAL.load(Ordering::Relaxed))));
                     unsafe { libc::_exit(0) };
                 }
             }
@@ -922,7 +1017,17 @@ fn watchdog() {
     });
 }
 
+/// Put the terminal back as the board found it.
+fn restore_terminal(tty: bool) {
+    let _ = execute!(std::io::stdout(), DisableFocusChange, DisableMouseCapture, LeaveAlternateScreen, cursor::Show);
+    if tty {
+        let _ = terminal::disable_raw_mode();
+    }
+    let _ = std::io::stdout().flush();
+}
+
 fn live(mut board: Board) {
+    note("started");
     if unsafe { libc::isatty(0) } == 1 {
         watchdog();
     }
@@ -965,8 +1070,19 @@ fn live(mut board: Board) {
         Err(e) => util::die(format!("no terminal: {e}")),
     };
     let _ = term.hide_cursor();
+    {
+        // a panic (release builds abort) would print on the alternate screen and be lost
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            restore_terminal(tty);
+            farewell(&format!("it crashed: {info}"));
+            hook(info);
+        }));
+    }
     let started = Instant::now();
     let mut loaded = false;
+    let mut stray = Stray::default();
+    let mut why: Option<String> = None;
     while !QUIT.load(Ordering::Relaxed) {
         let tick = spin_tick(started.elapsed());
         let (w, h) = terminal_size();
@@ -1025,11 +1141,14 @@ fn live(mut board: Board) {
         if !event::poll(Duration::from_millis(120)).unwrap_or(false) {
             continue;
         }
-        let mut going = true;
-        while going && event::poll(Duration::ZERO).unwrap_or(false) {
+        while why.is_none() && event::poll(Duration::ZERO).unwrap_or(false) {
             let Ok(ev) = event::read() else { break };
             match ev {
-                Event::Key(k) if k.kind != KeyEventKind::Release => going = board.key(k.code, k.modifiers, &shown),
+                Event::Key(k) if k.kind != KeyEventKind::Release => {
+                    if stray.admit(k.code, k.modifiers, Instant::now()) {
+                        why = board.key(k.code, k.modifiers, &shown).map(String::from);
+                    }
+                }
                 Event::Mouse(m) => {
                     let (x, y) = (m.column as usize, m.row as usize);
                     match m.kind {
@@ -1045,16 +1164,14 @@ fn live(mut board: Board) {
                 _ => {}
             }
         }
-        if !going {
+        if why.is_some() {
             break;
         }
     }
-    let _ = execute!(term.backend_mut(), DisableFocusChange, DisableMouseCapture, LeaveAlternateScreen);
-    let _ = term.show_cursor();
-    if tty {
-        let _ = terminal::disable_raw_mode();
-    }
-    let _ = std::io::stdout().flush();
+    drop(term);
+    restore_terminal(tty);
+    let why = why.unwrap_or_else(|| signal_reason(SIGNAL.load(Ordering::Relaxed)));
+    farewell(&why);
 }
 
 // ---- main ------------------------------------------------------------------
@@ -1078,6 +1195,12 @@ pub fn main(args: Vec<String>) {
     if has("-h") || has("--help") {
         println!("{}", HELP.trim());
         return;
+    }
+    if !(has("--once") || has("--json") || has("--watch")) {
+        // a live board: log its start and why it exits
+        let (argv, at) = log_names(&args);
+        let _ = EXIT_LOG.set((log_path(&home), argv, at));
+        util::on_die_note(|m| note(&format!("exited: {m}")));
     }
     let default = home.default_exchange();
     let mut scope: Option<Group> = None;
@@ -1185,6 +1308,9 @@ usage: switchboard [--exchange NAME|--all|--here|--session NAME] [--once|--json|
 Keys:  j/k ↑/↓ select · J/K tab/shift-tab next/prev session · g/G first/last
        enter jump · 1-9 session N · a this exchange / all · 0 main board · q quit
 Mouse: click a row or a card header to jump, wheel to move, ↖ to the main board
+
+A live board logs its start, and why it exits, to ~/.crossbar/logs/switchboard.log,
+and says why on its pane.
 ";
 
 #[cfg(test)]

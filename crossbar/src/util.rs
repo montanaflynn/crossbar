@@ -25,13 +25,38 @@ pub fn on_die(f: fn() -> !) {
     let _ = ON_DIE.set(f);
 }
 
+static ON_DIE_NOTE: std::sync::OnceLock<fn(&str)> = std::sync::OnceLock::new();
+
+/// Also hand die's message to F (the switchboard logs why it exits).
+pub fn on_die_note(f: fn(&str)) {
+    let _ = ON_DIE_NOTE.set(f);
+}
+
 /// Print `PROG: MSG` to stderr and exit 1.
 pub fn die(msg: impl AsRef<str>) -> ! {
     eprintln!("{}: {}", prog(), msg.as_ref());
+    if let Some(f) = ON_DIE_NOTE.get() {
+        f(msg.as_ref())
+    }
     if let Some(f) = ON_DIE.get() {
         f()
     }
     std::process::exit(1)
+}
+
+/// Append LINE (and a newline) to the log at PATH, making its folder; a log
+/// past 1 MB is moved to PATH.old first. Errors are ignored.
+pub fn append_log(path: &Path, line: &str) {
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > 1 << 20) {
+        let _ = std::fs::rename(path, path.with_extension("log.old"));
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(format!("{line}\n").as_bytes());
+    }
 }
 
 pub fn warn(msg: impl AsRef<str>) {

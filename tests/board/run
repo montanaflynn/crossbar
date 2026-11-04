@@ -208,6 +208,10 @@ def cases(side):
     screen = S.screen(bsid, bpane)
     check("a killed board's pane says so", "switchboard: killed by SIGKILL" in screen, screen[-300:].strip())
     check("so does the log", "killed by SIGKILL" in logged()[mark:], logged()[mark:].strip())
+    # in tmux, a killed board leaves its pane's mark on the shell: up still sees it's gone
+    code, out, err = side.run(["cbar", "up"], pane="central")
+    check("cbar up starts the killed board again", f"{E}/beta: started its switchboard again" in out, out + err)
+    check("which runs", wait_for(lambda: running(f"{E}/beta"), limit=15), S.boards().get(f"{E}/beta"))
 
     # a board whose pane is closed logs why it exited
     mark = len(logged())

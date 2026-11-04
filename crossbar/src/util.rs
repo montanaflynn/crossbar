@@ -59,6 +59,9 @@ pub fn append_log(path: &Path, line: &str) {
     }
 }
 
+/// Programs that are a shell: a pane running one has nothing else in it.
+pub const SHELLS: [&str; 9] = ["zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "nu", "elvish"];
+
 pub fn warn(msg: impl AsRef<str>) {
     eprintln!("{}: {}", prog(), msg.as_ref());
 }

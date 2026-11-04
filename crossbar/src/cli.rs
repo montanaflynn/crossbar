@@ -499,7 +499,6 @@ fn switchboard_path() -> String {
 
 // ---- up --------------------------------------------------------------------
 
-const SHELLS: [&str; 9] = ["zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "nu", "elvish"];
 
 fn cmd_up(home: &Home, args: Vec<String>) {
     let a = parse(&args, &["--tmux", "--rex"], "cbar up [EXCHANGE] [--tmux|--rex]");
@@ -537,7 +536,7 @@ fn cmd_up(home: &Home, args: Vec<String>) {
 
 /// Whether pane P only has a shell: no Claude status, a shell in front.
 fn only_shell(p: &status::Pane) -> bool {
-    p.state.is_empty() && SHELLS.contains(&p.program.as_str())
+    p.state.is_empty() && util::SHELLS.contains(&p.program.as_str())
 }
 
 /// What `cbar up` does about a running session's switchboard.

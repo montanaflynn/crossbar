@@ -414,7 +414,8 @@ impl Looker {
             },
             program: if s.is_some() || relayed {
                 "claude".into()
-            } else if !role.is_empty() {
+            } else if !role.is_empty() && !util::SHELLS.contains(&row["pane_current_command"].trim_start_matches('-')) {
+                // a board marks its pane; one that was killed leaves the mark on a shell
                 "switchboard".into()
             } else {
                 row["pane_current_command"].clone()

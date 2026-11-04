@@ -190,6 +190,9 @@ def cases(side):
 
     # a board killed outright: cbar run --pane board says so
     bsid, bpane = S.board(f"{E}/beta")
+    if not (bpane and running(f"{E}/beta")):
+        check("beta's board runs, to kill", False, S.boards())
+        return
     pid = None
     if side.rex:
         fg = side.mux.json("block", "call", "-s", bsid, "-b", bpane, "process").get("foreground") or {}
@@ -209,6 +212,9 @@ def cases(side):
     # a board whose pane is closed logs why it exited
     mark = len(logged())
     asid, apane = S.board(f"{E}/alpha")
+    if not apane:
+        check("alpha has a board, to close", False, S.boards())
+        return
     S.close(asid, apane)
     got = wait_for(lambda: "exited:" in logged()[mark:], limit=10)
     check("a board whose pane closes logs why", got, logged()[mark:].strip())

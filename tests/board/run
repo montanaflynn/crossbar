@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+"""Test the switchboards' panes and `cbar up` in a sandbox: a private tmux
+server, or a private Rex server, never the live one (the parity harness's
+sandbox, tests/parity/run).
+
+  tests/board/run [--rex] [--keep] [--no-build] [-v] CHECKOUT
+
+The exchange has its supervisor and main board, and projects alpha and beta
+their operators and local boards. Then:
+
+- every board is replaced the way the operator did it live (close the
+  board's pane, split `cbar run --pane board` off the supervisor's or
+  operator's pane): all six run;
+- the main board is sent a mouse report and a focus report that arrive as a
+  lone ESC and then the rest, as the Rex app's can. 0.5.3 quit on that Esc
+  and its pane dropped to a shell, silently: it must keep running, and not
+  jump anywhere;
+- q quits it: its pane and ~/.crossbar/logs/switchboard.log say why;
+- `cbar up` starts it again in its pane, and leaves the rest alone;
+- alpha's board pane is closed: `cbar up` adds one next to its operator;
+- `cbar up` again: everything is running and nothing changes;
+- a board killed with SIGKILL: its pane and the log say so;
+- a board whose pane is closed logs why it exited.
+
+Prints one line per check; exits 1 if any fails.
+"""
+import argparse
+import importlib.machinery
+import importlib.util
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+_loader = importlib.machinery.SourceFileLoader("parity", os.path.join(HERE, "..", "parity", "run"))
+_spec = importlib.util.spec_from_loader("parity", _loader)
+P = importlib.util.module_from_spec(_spec)
+_loader.exec_module(P)
+
+FAILS = []
+VERBOSE = False
+SHELLS = {"sh", "zsh", "bash", "-sh", "-zsh", "-bash"}
+
+
+def check(name, ok, detail=""):
+    print(f"{'ok  ' if ok else 'FAIL'}  {name}" + (f"  ({detail})" if detail and (not ok or VERBOSE) else ""), flush=True)
+    if not ok:
+        FAILS.append(name)
+    return ok
+
+
+def wait_for(fn, limit=30, step=0.5):
+    end = time.time() + limit
+    while time.time() < end:
+        v = fn()
+        if v:
+            return v
+        time.sleep(step)
+    return fn()
+
+
+class Panes:
+    """The sandbox's panes, by session, as the checks need them."""
+
+    def __init__(self, side):
+        self.side, self.mux = side, side.mux
+
+    def boards(self):
+        """{session: [(sid, pane, tab)]} of the panes labelled switchboard."""
+        out = {}
+        for p in self.mux.panes():
+            if p["label"] == "switchboard":
+                out.setdefault(p["session"], []).append((p["sid"], p["pane"], p["tab"]))
+        return out
+
+    def board(self, session):
+        b = self.boards().get(session, [])
+        return b[0][:2] if b else (None, None)
+
+    def program(self, sid, pane):
+        if self.side.rex:
+            fg = self.mux.json("block", "call", "-s", sid, "-b", pane, "process").get("foreground") or {}
+            return os.path.basename(fg.get("name") or "")
+        return self.mux("display-message", "-p", "-t", pane, "#{pane_current_command}").stdout.strip()
+
+    def screen(self, sid, pane):
+        if self.side.rex:
+            return self.mux("block", "capture", "-s", sid, "-b", pane, "--trim").stdout
+        return self.mux("capture-pane", "-p", "-t", pane).stdout
+
+    def close(self, sid, pane):
+        if self.side.rex:
+            self.mux("block", "close", "-s", sid, pane)
+        else:
+            self.mux("kill-pane", "-t", pane)
+
+    def write(self, sid, pane, data):
+        """Type DATA into PANE as one write."""
+        if self.side.rex:
+            import json
+            self.mux("block", "call", "-s", sid, "-b", pane, "write", json.dumps({"data": data}))
+        else:
+            self.mux("send-keys", "-t", pane, "-H", *[f"{b:02x}" for b in data.encode()])
+
+
+def cases(side):
+    E = P.EXCHANGE
+    S = Panes(side)
+    log = os.path.join(side.cb, "logs", "switchboard.log")
+    logged = lambda: open(log).read() if os.path.exists(log) else ""
+    sessions = [E, f"{E}/alpha", f"{E}/beta"]
+    leads = {E: side.panes_at["central"], f"{E}/alpha": side.panes_at["alpha"], f"{E}/beta": side.panes_at["beta"]}
+    board_argv = [os.path.join(side.bin, "cbar"), "run", "--pane", "board"]
+
+    def running(session):
+        sid, pane = S.board(session)
+        return pane and S.program(sid, pane) == "switchboard"
+
+    # every board replaced the operator's way
+    for s in sessions:
+        sid, pane = S.board(s)
+        if pane:
+            S.close(sid, pane)
+        lsid, lead = leads[s]
+        side.mux.split(lsid if side.rex else s, lead, side.box.home, board_argv, "switchboard")
+    ok = wait_for(lambda: all(running(s) for s in sessions), limit=20)
+    check("boards replaced the operator's way all run",
+          ok, {s: S.program(*S.board(s)) if S.board(s)[1] else "no pane" for s in sessions})
+    time.sleep(3)
+    check("and keeps running", all(running(s) for s in sessions))
+
+    sid, main = S.board(E)
+    # a mouse report and a focus report that arrive as a lone ESC, then the
+    # rest. Read as keys, its digits jump to sessions: a jump leaves ✓, ✗ or ?
+    # in the footer for 3s
+    footers = []
+    for tail in ("[<35;1;3M", "[I", "[<35;12;2M"):
+        S.write(sid, main, "\x1b")
+        time.sleep(0.1)
+        S.write(sid, main, tail)
+        time.sleep(0.6)
+        lines = [l for l in S.screen(sid, main).splitlines() if l.strip()]
+        footers.append(lines[-1].strip() if lines else "")
+    time.sleep(2)
+    check("a split mouse or focus report doesn't quit the main board", S.program(sid, main) == "switchboard",
+          S.screen(sid, main)[-300:].strip())
+    check("nor jump to a session", not any(f[:1] in ("✓", "✗", "?") for f in footers), footers)
+
+    # q quits it, and it says why
+    mark = len(logged())
+    S.write(sid, main, "q")
+    gone = wait_for(lambda: S.program(sid, main) in SHELLS, limit=10)
+    check("q quits it to a shell", gone, S.program(sid, main))
+    screen = S.screen(sid, main)
+    check("its pane says why", "switchboard: exited: q pressed" in screen, screen[-300:].strip())
+    check("so does the log", "exited: q pressed" in logged()[mark:] and f"switchboard --exchange {E}" in logged()[mark:],
+          logged()[mark:].strip())
+    check("which has its start too", "): started" in logged(), logged().strip()[:300])
+
+    # cbar up starts it again in its pane, and leaves the rest alone
+    others = {s: S.board(s) for s in sessions if s != E}
+    code, out, err = side.run(["cbar", "up"], pane="central")
+    check("cbar up says it started the main board again", f"{E}: started its switchboard again" in out, out + err)
+    check("it's running", wait_for(lambda: running(E), limit=15), S.boards().get(E))
+    check("one board in the exchange's session", len(S.boards().get(E, [])) == 1, S.boards().get(E))
+    check("in the supervisor's tab", all(t == "supervisor" for _, _, t in S.boards().get(E, [])), S.boards().get(E))
+    check("the projects' boards are left alone", all(S.board(s) == b for s, b in others.items()) and
+          all(f"{s}: running" in out for s in others), out)
+
+    # alpha's board pane is closed: cbar up puts one next to its operator
+    asid, apane = S.board(f"{E}/alpha")
+    S.close(asid, apane)
+    wait_for(lambda: not S.boards().get(f"{E}/alpha"), limit=10)
+    code, out, err = side.run(["cbar", "up"], pane="central")
+    check("cbar up adds alpha's board", f"{E}/alpha: started its switchboard" in out, out + err)
+    check("which runs", wait_for(lambda: running(f"{E}/alpha"), limit=15), S.boards().get(f"{E}/alpha"))
+    check("in alpha's operator tab", [t for _, _, t in S.boards().get(f"{E}/alpha", [])] == ["operator"],
+          S.boards().get(f"{E}/alpha"))
+
+    # and again: nothing to do
+    time.sleep(2)
+    snap = S.boards()
+    code, out, err = side.run(["cbar", "up"], pane="central")
+    check("cbar up again: all running", all(f"{s}: running" in out for s in sessions) and "started" not in out, out + err)
+    check("and no board changed", S.boards() == snap, f"{snap} → {S.boards()}")
+
+    # a board killed outright: cbar run --pane board says so
+    bsid, bpane = S.board(f"{E}/beta")
+    pid = None
+    if side.rex:
+        fg = side.mux.json("block", "call", "-s", bsid, "-b", bpane, "process").get("foreground") or {}
+        pid = fg.get("pid")
+    else:
+        root = side.mux("display-message", "-p", "-t", bpane, "#{pane_pid}").stdout.strip()
+        kids = P.sh(["pgrep", "-P", root]).stdout.split()
+        pid = int(kids[0]) if kids else None
+    mark = len(logged())
+    if pid:
+        os.kill(int(pid), signal.SIGKILL)
+    wait_for(lambda: S.program(bsid, bpane) in SHELLS, limit=10)
+    screen = S.screen(bsid, bpane)
+    check("a killed board's pane says so", "switchboard: killed by SIGKILL" in screen, screen[-300:].strip())
+    check("so does the log", "killed by SIGKILL" in logged()[mark:], logged()[mark:].strip())
+
+    # a board whose pane is closed logs why it exited
+    mark = len(logged())
+    asid, apane = S.board(f"{E}/alpha")
+    S.close(asid, apane)
+    got = wait_for(lambda: "exited:" in logged()[mark:], limit=10)
+    check("a board whose pane closes logs why", got, logged()[mark:].strip())
+    time.sleep(1)
+    check("and no board's exit reads as a crash", "crashed" not in logged(), logged().strip())
+    if VERBOSE:
+        P.say("the log:\n" + logged())
+
+
+def main():
+    global VERBOSE
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("checkout", nargs="?")
+    ap.add_argument("--rex", action="store_true")
+    ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--no-build", action="store_true")
+    ap.add_argument("-v", action="store_true")
+    ap.add_argument("-h", "--help", action="store_true")
+    a = ap.parse_args()
+    if a.help or not a.checkout:
+        print(__doc__.strip())
+        sys.exit(0 if a.help else 2)
+    VERBOSE = a.v
+
+    def stop(sig, _):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGHUP, stop)
+    root = os.path.realpath(tempfile.mkdtemp(prefix="cbbrd-", dir="/tmp"))   # short: Rex sockets live here
+    C = P.CLEANUP
+    C.add("sandbox", lambda: None if a.keep else shutil.rmtree(root, ignore_errors=True))
+    C.add("leftover processes", lambda: P.reap(root))
+    try:
+        box = P.Sandbox(root, a.rex)
+        side = P.build_new(box, os.path.realpath(a.checkout), not a.no_build, a.rex)
+        P.say(f"board: setting up ({'rex' if a.rex else 'tmux'})")
+        P.setup(side)
+        cases(side)
+        side.mux.stop()
+        n, ps, _ = P.leftovers(side)
+        check("nothing left running", n == 0, ps)
+    except KeyboardInterrupt:
+        P.say("board: interrupted")
+        return 130
+    finally:
+        C.run()
+        if a.keep:
+            P.say(f"board: kept the sandbox at {root}")
+    print(f"{len(FAILS)} failed ({'rex' if a.rex else 'tmux'})" if FAILS else f"all passed ({'rex' if a.rex else 'tmux'})")
+    return 1 if FAILS else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

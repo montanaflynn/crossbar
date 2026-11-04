@@ -969,7 +969,8 @@ fn note(what: &str) {
 /// to a shell is never silent.
 fn farewell(why: &str) {
     note(&format!("exited: {why}"));
-    eprintln!("switchboard: exited: {why}");
+    // not eprintln: with the pane gone, stderr is too, and eprintln would panic
+    let _ = writeln!(std::io::stderr(), "switchboard: exited: {why}");
 }
 
 fn terminal_size() -> (u16, u16) {
@@ -982,7 +983,7 @@ fn terminal_size() -> (u16, u16) {
 fn pane_gone(parent: libc::pid_t) -> Option<String> {
     unsafe {
         if libc::getppid() != parent {
-            return Some(format!("its parent (pid {parent}) exited"));
+            return Some(format!("its parent (pid {parent}) exited (its pane closed?)"));
         }
         if libc::tcgetpgrp(0) < 0 {
             return Some("its terminal is gone".into());

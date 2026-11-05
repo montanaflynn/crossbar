@@ -110,16 +110,21 @@ cbar rm [-y] [-f] PATH                 an agent: close its tab, and remove its w
                                        uncommitted changes, unless -f); a project or an exchange:
                                        kill its session and unregister it, briefs and reports too
                                        (asks first)
-cbar watch                             a line each time one of your agents or operators turns
-                                       done, blocked or error, stops or closes
+cbar watch [--next]                    a line each time one of your agents or operators turns
+                                       done, blocked or error, stops or closes (--next: wait for
+                                       the first event, print it and exit)
 cbar board [EXCHANGE|PROJECT] [--all]  the switchboard (--once prints once, --json prints JSON)
 cbar update | version | help
 ```
 
-`cbar watch` is meant for Claude's Monitor tool. Operators hear about their agents, and
-supervisors about their own agents and their projects' operators. When it starts, it also
-prints what is already blocked or in error, and anything done that a previous watch hadn't
-reported.
+Operators hear about their agents from `cbar watch`, and supervisors about their own agents
+and their projects' operators. When it starts, it also prints what is already blocked or in
+error, anything done that a previous watch hadn't reported, and anything a previous watch knew
+that has stopped or closed since. Supervisors and operators run `cbar watch --next` as a
+background Bash command: it waits, silently, for the first event, prints it (and whatever else
+happens within a second), and exits; they act on it and start it again. Run one after another,
+the runs print every event once, and a blocked or errored report once printed isn't printed
+again. What each watch knew is kept in `~/.crossbar/watch/<session>.json`.
 
 The panes cbar makes run `cbar run supervisor|operator|board|agent` as their own command, so
 nothing is typed into a shell. When that program exits, the pane drops to your login shell.
@@ -130,7 +135,7 @@ nothing is typed into a shell. When that program exits, the pane drops to your l
 `cbar run … --resume <id>` in the same pane, and once it's up tells it why it was restarted.
 Restarting your own pane waits until your turn ends; its log is in `~/.crossbar/logs/`. On
 `/exit`, cbar answers only two of Claude's questions: keep an agent's worktree, and stop
-background work such as a `cbar watch` Monitor. It never answers the folder-trust question: if
+background work such as a `cbar watch --next`. It never answers the folder-trust question: if
 the restarted Claude asks, cbar says so and exits 1, and you answer it in the pane.
 
 ### Files

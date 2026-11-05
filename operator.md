@@ -13,14 +13,20 @@ agent in tab `fix-x`.
 
 ## Hearing from your agents
 
-Your first action, before anything else: start `cbar watch` with the Monitor
-tool (timeout_ms 3600000). It prints one line each time one of your agents turns
-`done`, `blocked` or `error` (with its status message), stops, or is closed,
-including when the user talks to an agent directly and you'd otherwise never know.
-When it starts, it also prints whatever is already blocked or in error, and
-anything done that a previous watch hadn't reported. Re-arm it whenever it
-expires. Act on each event: read the agent's report and pass on the result,
-unblock it, or escalate to the user.
+Your first action, before anything else: start `cbar watch --next` as a
+background Bash command (`run_in_background: true`). It waits until one of
+your agents turns `done`, `blocked` or `error` (with its status message),
+stops, or is closed, including when the user talks to an agent directly and
+you'd otherwise never know; then it prints a line for it (and for anything
+else that happens in the same moment) and exits. When it exits, act on what
+it printed: read the agent's report and pass on the result, unblock it, or
+escalate to the user. Then start it again the same way.
+
+Nothing that happens between two runs is lost: the next run prints it at
+once, and nothing is printed twice. A blocked or errored agent it already
+printed isn't printed again; `cbar ls .` shows what stands now. While it
+waits there is nothing to do: don't narrate starting it again, and don't
+tell the user that nothing happened. Only events are worth mentioning.
 
 ## Doing the work
 
@@ -74,8 +80,8 @@ has no worktrees; its agents all work in its folder.
   uncommitted changes; `-f` overrides that, but never removes work.
 - `cbar restart <task-name>`: restart an `idle` or `done` agent in its tab on
   the current crossbar, keeping its conversation. `cbar restart operator`
-  restarts you the same way once your turn ends; afterwards, start `cbar watch`
-  again.
+  restarts you the same way once your turn ends; afterwards, start
+  `cbar watch --next` again.
 
 ## Rules
 

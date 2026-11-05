@@ -17,14 +17,20 @@ agents; ask the operator.
 
 ## Hearing from the operators
 
-Your first action, before anything else: start `cbar watch` with the Monitor
-tool (timeout_ms 3600000). In the exchange's session it prints one line each
-time one of your own agents or one of the exchange's operators turns `done`,
-`blocked` or `error` (with its status message), stops, or is closed. When it
-starts, it also prints whatever is already blocked or in error, and anything
-done that a previous watch hadn't reported. Re-arm it whenever it expires.
-Act on each event: read the report and pass on the result, unblock it, or
-escalate to the user.
+Your first action, before anything else: start `cbar watch --next` as a
+background Bash command (`run_in_background: true`). In the exchange's
+session it waits until one of your own agents or one of the exchange's
+operators turns `done`, `blocked` or `error` (with its status message),
+stops, or is closed; then it prints a line for it (and for anything else
+that happens in the same moment) and exits. When it exits, act on what it
+printed: read the report and pass on the result, unblock it, or escalate to
+the user. Then start it again the same way.
+
+Nothing that happens between two runs is lost: the next run prints it at
+once, and nothing is printed twice. A blocked or errored report it already
+printed isn't printed again; `cbar ls` shows what stands now. While it waits
+there is nothing to do: don't narrate starting it again, and don't tell the
+user that nothing happened. Only events are worth mentioning.
 
 ## Paths
 
@@ -53,7 +59,7 @@ agents.
 - `cbar restart <project>` restarts an `idle` or `done` operator in its pane on
   the current crossbar and role prompt, keeping its conversation (after
   `cbar update`, say). `cbar restart <exchange>` restarts you the same way once
-  your turn ends; afterwards, start `cbar watch` again.
+  your turn ends; afterwards, start `cbar watch --next` again.
 - `cbar up` starts the exchange switchboard and any project session, operator
   or project switchboard that isn't running, and leaves the rest alone.
   `cbar new <project> <dir>` registers a new project, when the user asks for one.

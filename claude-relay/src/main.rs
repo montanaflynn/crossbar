@@ -144,6 +144,8 @@ fn relay(argv: &[CString], pane: String) -> i32 {
     unsafe {
         let mut size: libc::winsize = std::mem::zeroed();
         libc::ioctl(0, libc::TIOCGWINSZ, &mut size);
+        // openpty takes *const termios/winsize on Linux but *mut on macOS.
+        #[allow(clippy::unnecessary_mut_passed)]
         if libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), &mut saved, &mut size) != 0 {
             die("openpty");
         }
@@ -175,7 +177,7 @@ fn relay(argv: &[CString], pane: String) -> i32 {
     for sig in [libc::SIGWINCH, libc::SIGCONT, libc::SIGTERM, libc::SIGHUP] {
         unsafe {
             let mut action: libc::sigaction = std::mem::zeroed();
-            action.sa_sigaction = on_signal as usize;
+            action.sa_sigaction = on_signal as *const () as usize;
             action.sa_flags = libc::SA_RESTART;
             libc::sigaction(sig, &action, std::ptr::null_mut());
         }

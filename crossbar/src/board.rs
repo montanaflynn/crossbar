@@ -1089,8 +1089,8 @@ fn live(mut board: Board) {
         });
     }
     unsafe {
-        libc::signal(libc::SIGTERM, on_quit as libc::sighandler_t);
-        libc::signal(libc::SIGHUP, on_quit as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_quit as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGHUP, on_quit as *const () as libc::sighandler_t);
     }
     let tty = unsafe { libc::isatty(0) } == 1;
     let mut out = std::io::stdout();

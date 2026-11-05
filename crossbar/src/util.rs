@@ -250,6 +250,8 @@ fn local_tm(secs: i64) -> libc::tm {
 /// Local time now with its offset, e.g. 2026-10-30T17:15:31-05:00.
 pub fn local_iso_now() -> String {
     let tm = local_tm(now_secs() as i64);
+    // tm_gmtoff is a c_long: i64 here, but i32 on 32-bit targets.
+    #[allow(clippy::unnecessary_cast)]
     let off = tm.tm_gmtoff as i64;
     let sign = if off < 0 { '-' } else { '+' };
     let off = off.abs();

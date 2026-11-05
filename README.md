@@ -213,6 +213,24 @@ checkout. Installing replaces `bin/` and the role prompts in `~/.crossbar`, so m
 here, not in the installed copy. It never touches `config.toml` or `exchanges/`. Files are
 swapped in by rename, so panes already running the old copy keep working.
 
+`cargo test` runs the unit tests and the sandbox tests in `crossbar/tests/sandbox/`, which
+drive `cbar restart`, the switchboards with `cbar up`, and `cbar watch` end to end. Each test
+gets its own sandbox under `/tmp`: a private tmux server (`tmux -L`), a scratch `HOME` and
+`CROSSBAR_HOME`, and a stub `claude` (`crossbar/tests/sandbox/stub/claude`) that reports the
+states its brief asks for. The tests never touch your tmux server, Rex or `~/.crossbar`. They
+need tmux and git, and are skipped without tmux. CI runs them on Linux and macOS on each push
+to `main` and on pull requests.
+
+The same tests on a private Rex server (`rex -S SOCK --autostart=false`) need Rex, so they only
+run when you ask for them. They take turns, so they take a few minutes:
+
+```sh
+cargo test --test sandbox -- --ignored
+```
+
+Add `--nocapture` to see a line per check as it runs. `CBAR_TEST_VERBOSE=1` adds each check's
+detail, and `CBAR_TEST_KEEP=1` keeps the sandbox so you can look at it afterwards.
+
 Pushing a tag `vX.Y.Z` that matches `VERSION` builds the release binaries for macOS and Linux
 (arm64 and x86_64) in GitHub Actions.
 

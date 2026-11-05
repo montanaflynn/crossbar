@@ -486,6 +486,16 @@ pub fn resolve(name: &str) -> Option<Group> {
     pool.into_iter().find(|g| g.session_id == name || g.label == name)
 }
 
+/// The id of this pane's session: tmux's ($TMUX_PANE), else Rex's ($REX_SESSION).
+pub fn here_id() -> Option<String> {
+    util::env("TMUX_PANE")
+        .and_then(|p| {
+            let (code, out, _) = mux::tmux_s(&["display-message", "-p", "-t", &p, "#{session_id}"]);
+            (code == 0 && !out.trim().is_empty()).then(|| out.trim().to_string())
+        })
+        .or_else(|| util::env("REX_SESSION"))
+}
+
 /// A pane flattened with its group, as `cbar` uses them.
 #[derive(Clone, Debug)]
 pub struct Flat {

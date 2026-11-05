@@ -22,16 +22,32 @@
 //! many turns end on it: the ledger keeps that line through the looks in
 //! between and across runs. A stop or a close is still printed, and drops
 //! it, so what the pane says next is news.
+//!
+//! While it runs, a watch holds a lease for its session: a file under
+//! ~/.crossbar/watch/<session>.live/ that it keeps locked (flock) until it
+//! exits, so a watch that was killed holds none. `watching` says whether a
+//! watch runs for a session, and `waiting` what a `--next` started now would
+//! print at once. With them `cbar ls` and the switchboards flag a supervisor
+//! or operator that runs with no watch, and `cbar watch --check` (the Stop
+//! hook crossbar gives the supervisors and operators it starts) tells that
+//! Claude at the end of its turn.
 
 use std::collections::HashMap;
+use std::ffi::CString;
+use std::fs::File;
 use std::io::Write;
-use std::path::PathBuf;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::io::AsRawFd;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-use crate::layout::{Home, OPERATOR, SEP};
-use crate::status::{Looker, Pane};
+use crate::layout::{Home, OPERATOR, SEP, SUPERVISOR};
+use crate::status::{Group, Looker, Pane, Snapshot};
 use crate::util;
 
 const REPORTABLE: [&str; 3] = ["done", "blocked", "error"];
@@ -114,32 +130,33 @@ fn yes() -> bool {
     true
 }
 
-/// {pane id: report} for the panes reporting to whoever runs in session
-/// SCOPE (id) labelled LABEL. Switchboards and our own pane are left out.
-fn reports(look: &Looker, home: &Home, scope: &str, label: &str) -> HashMap<String, Report> {
+/// The look a watch of session SCOPE (id) labelled LABEL takes: every
+/// session for an exchange's (its projects' operators report to it), else
+/// that session's.
+fn snapshot(look: &Looker, home: &Home, scope: &str, label: &str) -> Snapshot {
+    look.snapshot(if home.exchange_exists(label) { None } else { Some(scope) })
+}
+
+/// {pane id: report} for the panes in SNAP reporting to whoever runs in
+/// session SCOPE (id) labelled LABEL: that session's panes and, in an
+/// exchange's session, its projects' operators. Switchboards and the panes
+/// in SKIP (the watcher's own, when the Looker didn't hide it) are left out.
+fn reports(snap: &Snapshot, home: &Home, scope: &str, label: &str, skip: &[&str]) -> HashMap<String, Report> {
     let mut found = HashMap::new();
     let mut add = |name: String, p: &Pane| {
-        if p.program != "switchboard" && p.label != "switchboard" {
+        if p.program != "switchboard" && p.label != "switchboard" && !skip.contains(&p.block_id.as_str()) {
             let r = Report { name, state: p.state.clone(), kind: p.kind.clone(), msg: p.msg.clone(), since: p.since_at.clone(), owner: p.owner };
             found.insert(p.block_id.clone(), r);
         }
     };
     let name_of = |p: &Pane| if p.tab.is_empty() { p.program.clone() } else { p.tab.clone() };
-    // an exchange's session
-    if !home.exchange_exists(label) {
-        for (_, panes) in look.snapshot(Some(scope)) {
-            for p in &panes {
-                add(name_of(p), p);
-            }
-        }
-        return found;
-    }
+    let exchange = home.exchange_exists(label);
     let prefix = format!("{label}{SEP}");
-    for (g, panes) in look.snapshot(None) {
-        for p in &panes {
-            if g.session_id == scope {
+    for (g, panes) in snap {
+        for p in panes {
+            if p.session_id == scope {
                 add(name_of(p), p);
-            } else if p.tab == OPERATOR {
+            } else if exchange && p.tab == OPERATOR {
                 if let Some(project) = g.label.strip_prefix(&prefix) {
                     add(format!("{project} operator"), p);
                 }
@@ -149,9 +166,203 @@ fn reports(look: &Looker, home: &Home, scope: &str, label: &str) -> HashMap<Stri
     found
 }
 
+/// Session LABEL as a file name.
+fn file_name(label: &str) -> String {
+    label.replace(SEP, "+")
+}
+
 /// Where a watch of session LABEL keeps what it printed.
 fn seen_file(home: &Home, label: &str) -> PathBuf {
-    home.root.join("watch").join(format!("{}.json", label.replace(SEP, "+")))
+    home.root.join("watch").join(format!("{}.json", file_name(label)))
+}
+
+/// Where the watches of session LABEL keep their leases, one file each.
+fn lease_dir(home: &Home, label: &str) -> PathBuf {
+    home.root.join("watch").join(format!("{}.live", file_name(label)))
+}
+
+/// flock(F, HOW) without waiting: whether it got the lock.
+fn flock(f: &File, how: libc::c_int) -> bool {
+    unsafe { libc::flock(f.as_raw_fd(), how | libc::LOCK_NB) == 0 }
+}
+
+/// The lease of a running watch: `<pid>.json` (its pid, when it started and
+/// its mode) in its session's lease folder, locked while the watch runs. It
+/// is removed when the watch ends; the lock goes with the process however it
+/// ends (and a pid used again holds no lock), so a file left by a killed
+/// watch counts for nothing.
+pub struct Lease {
+    path: PathBuf,
+    _file: File,
+}
+
+/// The lease to remove if the watch is killed (SIGTERM, SIGHUP, SIGINT).
+static LEASE_PATH: OnceLock<CString> = OnceLock::new();
+
+extern "C" fn drop_lease(sig: libc::c_int) {
+    if let Some(p) = LEASE_PATH.get() {
+        unsafe { libc::unlink(p.as_ptr()) };
+    }
+    unsafe { libc::_exit(128 + sig) };
+}
+
+impl Lease {
+    /// Take a lease for a watch of session LABEL in mode MODE ("next" or
+    /// "plain"). It is written and locked under a temporary name, then
+    /// renamed into place, so no one finds it unlocked.
+    pub fn take(home: &Home, label: &str, mode: &str) -> std::io::Result<Lease> {
+        let dir = lease_dir(home, label);
+        std::fs::create_dir_all(&dir)?;
+        let pid = std::process::id();
+        let tmp = dir.join(format!(".{pid}.tmp"));
+        let mut file = File::create(&tmp)?;
+        if !flock(&file, libc::LOCK_EX) {
+            return Err(std::io::Error::last_os_error());
+        }
+        let info = serde_json::json!({"pid": pid, "started": util::utc_iso_now(), "mode": mode});
+        file.write_all(info.to_string().as_bytes())?;
+        let path = dir.join(format!("{pid}.json"));
+        std::fs::rename(&tmp, &path)?;
+        if let Ok(c) = CString::new(path.as_os_str().as_bytes()) {
+            if LEASE_PATH.set(c).is_ok() {
+                for sig in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
+                    unsafe { libc::signal(sig, drop_lease as *const () as libc::sighandler_t) };
+                }
+            }
+        }
+        Ok(Lease { path, _file: file })
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Whether the lease file PATH is held by a running watch. One that isn't is
+/// removed (if it is still the file we looked at).
+fn held(path: &Path) -> bool {
+    let Ok(f) = File::open(path) else { return false };
+    if !flock(&f, libc::LOCK_EX) {
+        return true;
+    }
+    // nobody holds it: its watch is gone
+    let ours = f.metadata().ok().map(|m| (m.dev(), m.ino()));
+    if ours.is_some() && std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino())) == ours {
+        let _ = std::fs::remove_file(path);
+    }
+    false
+}
+
+/// Whether a watch (`cbar watch`, plain or --next) runs for session LABEL.
+pub fn watching(home: &Home, label: &str) -> bool {
+    let Ok(rd) = std::fs::read_dir(lease_dir(home, label)) else { return false };
+    let mut found = false;
+    for e in rd.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        // every file is looked at, so those of killed watches are cleared
+        if !name.starts_with('.') && name.ends_with(".json") && held(&e.path()) {
+            found = true;
+        }
+    }
+    found
+}
+
+/// The lines a `cbar watch --next` started now in session SCOPE (id)
+/// labelled LABEL would print at once (in its first looks, a missing message
+/// waited for), from SNAP: the events waiting for a watch. It changes
+/// nothing, the ledger included. SKIP: as for `reports`.
+pub fn waiting(home: &Home, snap: &Snapshot, scope: &str, label: &str, skip: &[&str]) -> Vec<String> {
+    let cur = reports(snap, home, scope, label, skip);
+    let mut w = Watch::new(Ledger::peek(seen_file(home, label)), true);
+    let alive = |pid: i64| util::alive(&pid.to_string());
+    pending(&mut w, &cur, &alive)
+}
+
+/// The lines W prints over its first two looks at CUR, the second as late
+/// as a missing message is waited for (what closed shows then, and what had
+/// no message yet).
+fn pending(w: &mut Watch, cur: &HashMap<String, Report>, alive: &dyn Fn(i64) -> bool) -> Vec<String> {
+    let now = Instant::now();
+    let mut events = w.look(cur, now, alive);
+    w.record(&events);
+    let more = w.look(cur, now + w.tracker.wait_msg, alive);
+    events.extend(more);
+    events.iter().map(|(_, r, state)| line(&r.name, state, &r.kind, &r.msg)).collect()
+}
+
+/// The role whose Claude watches session LABEL: an exchange's supervisor, a
+/// registered project's operator; None for any other session.
+fn watcher(home: &Home, label: &str) -> Option<&'static str> {
+    if home.exchange_exists(label) {
+        return Some(SUPERVISOR);
+    }
+    let (e, p) = label.split_once(SEP)?;
+    home.project(e, p).map(|_| OPERATOR)
+}
+
+/// The supervisor and operator panes in SNAP, of SESSIONS (id, label), whose
+/// Claude runs while no watch does: pane id → the events waiting for it.
+/// Agents never count: they don't watch. For an exchange's session, SNAP must
+/// hold every session to count its operators' events.
+pub fn unwatched(home: &Home, snap: &Snapshot, sessions: &[(String, String)]) -> HashMap<String, Vec<String>> {
+    let mut out = HashMap::new();
+    for (sid, label) in sessions {
+        let Some(role) = watcher(home, label) else { continue };
+        let pane = snap.iter().flat_map(|(_, ps)| ps).find(|p| p.session_id == *sid && p.tab == role && p.label != "switchboard" && !p.state.is_empty());
+        if let Some(p) = pane {
+            if !watching(home, label) {
+                out.insert(p.block_id.clone(), waiting(home, snap, sid, label, &[&p.block_id]));
+            }
+        }
+    }
+    out
+}
+
+/// The sessions of SNAP (id, label), when its groups are sessions (not one
+/// session's tabs).
+pub fn sessions(snap: &Snapshot) -> Vec<(String, String)> {
+    snap.iter().filter(|(g, _)| g.window_id.is_none()).map(|(g, _)| (g.session_id.clone(), g.label.clone())).collect()
+}
+
+/// What `cbar watch --check`, the Stop hook, tells the Claude in session G
+/// whose turn ends, from the hook's INPUT: None when a watch runs, when
+/// Claude Code is already going on for a Stop hook (`stop_hook_active`: at
+/// most once a turn), or when its background tasks hold a `cbar watch` (one
+/// just started, before its lease); else why it should go on.
+pub fn check(home: &Home, g: &Group, input: &Value) -> Option<String> {
+    if input["stop_hook_active"].as_bool() == Some(true) || starting(input) || watching(home, &g.label) {
+        return None;
+    }
+    let snap = snapshot(&Looker::new(true), home, &g.session_id, &g.label);
+    // one may have started while we looked
+    if watching(home, &g.label) {
+        return None;
+    }
+    Some(nudge(&g.label, &waiting(home, &snap, &g.session_id, &g.label, &[])))
+}
+
+/// Whether the Stop hook's INPUT lists a running background `cbar watch`:
+/// one just started, before it took its lease, or one of a cbar too old to take one.
+fn starting(input: &Value) -> bool {
+    input["background_tasks"].as_array().is_some_and(|ts| {
+        ts.iter().any(|t| {
+            let cmd = t["command"].as_str().unwrap_or("");
+            t["status"].as_str().is_none_or(|s| s == "running") && (cmd.contains("cbar watch") || cmd.contains("switchboard --watch"))
+        })
+    })
+}
+
+/// What the Stop hook says when no watch runs for SESSION, with the events WAITING.
+pub fn nudge(session: &str, waiting: &[String]) -> String {
+    let what = match waiting.len() {
+        0 => "no events are waiting yet".to_string(),
+        1 => format!("1 event is waiting: {}", waiting[0]),
+        n => format!("{n} events are waiting: {}", waiting.join("; ")),
+    };
+    format!("cbar watch isn't running for {session}; {what}. Start `cbar watch --next` as a background Bash command, then act on what it prints.")
 }
 
 struct Ledger {
@@ -159,16 +370,26 @@ struct Ledger {
     seen: HashMap<String, Seen>,
     /// What the file holds.
     saved: HashMap<String, Seen>,
+    /// Only looked at: never saved.
+    readonly: bool,
 }
 
 impl Ledger {
     fn load(path: PathBuf) -> Ledger {
         let seen: HashMap<String, Seen> = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-        Ledger { path, saved: seen.clone(), seen }
+        Ledger { path, saved: seen.clone(), seen, readonly: false }
+    }
+
+    /// The ledger at PATH, to look at only.
+    fn peek(path: PathBuf) -> Ledger {
+        Ledger { readonly: true, ..Ledger::load(path) }
     }
 
     fn save(&mut self) {
         self.saved = self.seen.clone();
+        if self.readonly {
+            return;
+        }
         if let Some(dir) = self.path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
@@ -411,7 +632,11 @@ impl Watch {
 
 /// Watch, printing events (see Tracker): forever, or with NEXT until the
 /// first look that has any, and one more a second later.
+/// It holds its lease (see Lease) until it returns.
 pub fn watch(home: &Home, scope: &str, label: &str, next: bool) {
+    let _lease = Lease::take(home, label, if next { "next" } else { "plain" })
+        .map_err(|e| util::warn(format!("could not take the watch lease in {}: {e}", util::short(lease_dir(home, label)))))
+        .ok();
     let every = Duration::from_secs(3);
     let look = Looker::new(true);
     let mut w = Watch::new(Ledger::load(seen_file(home, label)), next);
@@ -419,17 +644,17 @@ pub fn watch(home: &Home, scope: &str, label: &str, next: bool) {
     let alive = |pid: i64| util::alive(&pid.to_string());
     let mut last_look = false;
     loop {
-        let cur = reports(&look, home, scope, label);
+        let cur = reports(&snapshot(&look, home, scope, label), home, scope, label, &[]);
         let events = w.look(&cur, Instant::now(), &alive);
         for (_, r, state) in &events {
             if writeln!(out, "{}", line(&r.name, state, &r.kind, &r.msg)).and_then(|_| out.flush()).is_err() {
-                std::process::exit(0); // nobody is listening
+                return; // nobody is listening
             }
         }
         w.record(&events);
         if next && (last_look || !events.is_empty()) {
             if last_look {
-                std::process::exit(0);
+                return;
             }
             // and whatever else happens in the same moment
             last_look = true;
@@ -729,6 +954,159 @@ mod tests {
         let mut w = Watch::new(Ledger::load(path.clone()), true);
         assert_eq!(through(&mut w, &[cur], &|_| true), vec!["b: done — fine"]);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    fn home(tag: &str) -> Home {
+        let root = std::env::temp_dir().join(format!("cbar-watch-guard-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = Home { root: root.clone() };
+        home.register_exchange("central", crate::mux::Term::Tmux, None).unwrap();
+        home.register_project("central", "stats", &root, crate::mux::Term::Tmux).unwrap();
+        home
+    }
+
+    fn pane(sid: &str, block: &str, tab: &str, state: &str, msg: &str, owner: i64) -> Pane {
+        Pane {
+            session_id: sid.into(),
+            block_id: block.into(),
+            window_id: format!("w{block}"),
+            tab: tab.into(),
+            label: "shell".into(),
+            program: "claude".into(),
+            cwd: "~/x".into(),
+            state: state.into(),
+            kind: String::new(),
+            msg: msg.into(),
+            since: "1m".into(),
+            since_at: "t1".into(),
+            owner: Some(owner),
+        }
+    }
+
+    fn group(sid: &str, label: &str) -> Group {
+        Group { session_id: sid.into(), label: label.into(), mux: "tmux".into(), window_id: None }
+    }
+
+    /// The exchange central (supervisor idle, one agent done) and its project
+    /// stats (operator done, an agent done, one blocked, one working).
+    fn snap() -> Snapshot {
+        let me = std::process::id() as i64; // alive
+        vec![
+            (group("$0", "central"), vec![pane("$0", "%0", "supervisor", "idle", "", me), pane("$0", "%1", "notes", "done", "wrote it", me)]),
+            (
+                group("$1", "central/stats"),
+                vec![
+                    pane("$1", "%2", "operator", "done", "waiting on fix-x", me),
+                    pane("$1", "%3", "fix-x", "done", "fixed", me),
+                    pane("$1", "%4", "fix-y", "blocked", "allow?", me),
+                    pane("$1", "%5", "fix-z", "working", "", me),
+                ],
+            ),
+        ]
+    }
+
+    #[test]
+    fn a_lease_is_held_while_its_watch_runs() {
+        let home = home("lease");
+        assert!(!watching(&home, "central/stats"));
+        let lease = Lease::take(&home, "central/stats", "next").unwrap();
+        assert!(watching(&home, "central/stats"));
+        assert!(!watching(&home, "central"), "a lease is its session's only");
+        let info: Value = serde_json::from_str(&std::fs::read_to_string(&lease.path).unwrap()).unwrap();
+        assert_eq!((info["pid"].as_u64(), info["mode"].as_str()), (Some(std::process::id() as u64), Some("next")));
+        assert!(lease.path.starts_with(home.root.join("watch/central+stats.live")));
+        drop(lease);
+        assert!(!watching(&home, "central/stats"));
+        assert_eq!(std::fs::read_dir(lease_dir(&home, "central/stats")).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&home.root);
+    }
+
+    /// A lease left by a watch that was killed (its file, unlocked) is no
+    /// watch, and is cleared; one still held stays.
+    #[test]
+    fn a_killed_watchs_lease_counts_for_nothing() {
+        let home = home("stale");
+        let dir = lease_dir(&home, "central");
+        std::fs::create_dir_all(&dir).unwrap();
+        let stale = dir.join("99999.json");
+        std::fs::write(&stale, r#"{"pid": 99999, "started": "t0", "mode": "next"}"#).unwrap();
+        assert!(!watching(&home, "central"));
+        assert!(!stale.exists());
+        std::fs::write(&stale, "{}").unwrap();
+        let live = Lease::take(&home, "central", "plain").unwrap();
+        assert!(watching(&home, "central"));
+        assert!(!stale.exists() && live.path.exists());
+        drop(live);
+        let _ = std::fs::remove_dir_all(&home.root);
+    }
+
+    /// What waits for an operator's watch is what a --next started now would
+    /// print; looking changes nothing, and once a watch printed it, nothing waits.
+    #[test]
+    fn waiting_is_what_a_next_would_print() {
+        let home = home("waiting");
+        let snap = snap();
+        let got = waiting(&home, &snap, "$1", "central/stats", &["%2"]);
+        assert_eq!(got, vec!["fix-x: done — fixed", "fix-y: blocked — allow?"]);
+        assert!(!seen_file(&home, "central/stats").exists(), "looking saves no ledger");
+        // a --next run prints them
+        let mut w = Watch::new(Ledger::load(seen_file(&home, "central/stats")), true);
+        let cur = reports(&snap, &home, "$1", "central/stats", &["%2"]);
+        assert_eq!(pending(&mut w, &cur, &|_| true).len(), 2);
+        assert!(waiting(&home, &snap, "$1", "central/stats", &["%2"]).is_empty());
+        // the supervisor's: its own agent and its projects' operators, not their agents
+        assert_eq!(waiting(&home, &snap, "$0", "central", &["%0"]), vec!["notes: done — wrote it", "stats operator: done — waiting on fix-x"]);
+        let _ = std::fs::remove_dir_all(&home.root);
+    }
+
+    /// The flag: supervisors and operators running with no watch, never agents.
+    #[test]
+    fn flags_a_supervisor_or_operator_with_no_watch() {
+        let home = home("unwatched");
+        let snap = snap();
+        let all = sessions(&snap);
+        let got = unwatched(&home, &snap, &all);
+        let mut keys: Vec<&String> = got.keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["%0", "%2"]);
+        assert_eq!(got["%2"].len(), 2);
+        assert_eq!(got["%0"].len(), 2);
+        // the operator starts a watch: only the supervisor is left
+        let lease = Lease::take(&home, "central/stats", "next").unwrap();
+        assert_eq!(unwatched(&home, &snap, &all).into_keys().collect::<Vec<_>>(), vec!["%0".to_string()]);
+        drop(lease);
+        // a Claude that isn't running isn't flagged, nor is a session crossbar didn't make
+        let mut quiet = snap.clone();
+        quiet[1].1[0].state.clear();
+        quiet.push((group("$9", "scratch"), vec![pane("$9", "%9", "operator", "idle", "", 1)]));
+        assert!(!unwatched(&home, &quiet, &sessions(&quiet)).contains_key("%2"));
+        assert!(!unwatched(&home, &quiet, &sessions(&quiet)).contains_key("%9"));
+        let _ = std::fs::remove_dir_all(&home.root);
+    }
+
+    /// The Stop hook lets the turn end when Claude Code is already going on
+    /// for a Stop hook, and when a `cbar watch` it just started has no lease yet.
+    #[test]
+    fn the_stop_hook_blocks_once_a_turn() {
+        let home = home("check");
+        let g = group("$1", "central/stats");
+        let again = serde_json::json!({"stop_hook_active": true, "background_tasks": []});
+        assert_eq!(check(&home, &g, &again), None);
+        let started = serde_json::json!({"stop_hook_active": false, "background_tasks": [
+            {"id": "b1", "type": "shell", "status": "running", "description": "watch", "command": "cbar watch --next"}]});
+        assert_eq!(check(&home, &g, &started), None);
+        let lease = Lease::take(&home, "central/stats", "next").unwrap();
+        assert_eq!(check(&home, &g, &serde_json::json!({"stop_hook_active": false})), None);
+        drop(lease);
+        let other = serde_json::json!({"background_tasks": [{"type": "shell", "status": "running", "command": "cargo test"}]});
+        assert!(!starting(&other));
+        assert_eq!(
+            nudge("central/stats", &["fix-x: done — fixed".into(), "fix-y: blocked — allow?".into()]),
+            "cbar watch isn't running for central/stats; 2 events are waiting: fix-x: done — fixed; fix-y: blocked — allow?. \
+             Start `cbar watch --next` as a background Bash command, then act on what it prints."
+        );
+        assert!(nudge("central", &[]).starts_with("cbar watch isn't running for central; no events are waiting yet. Start"));
+        let _ = std::fs::remove_dir_all(&home.root);
     }
 
     /// A new report without a message waits for one at startup too.

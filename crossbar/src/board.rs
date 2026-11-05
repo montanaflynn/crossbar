@@ -72,6 +72,8 @@ const BLOCKED: Color = Color::Rgb(0xee, 0x53, 0x96);
 const ERROR: Color = Color::Rgb(0xff, 0x7e, 0xb6);
 const DONE: Color = Color::Rgb(0x25, 0xbe, 0x6a);
 const WORKING: Color = Color::Rgb(0x78, 0xa9, 0xff);
+/// Warnings (a supervisor or operator with no watch): Carbon's support-warning yellow.
+const WARN: Color = Color::Rgb(0xf1, 0xc2, 0x1b);
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 /// How long each spinner frame shows.
 const SPIN_STEP: Duration = Duration::from_millis(120);
@@ -201,13 +203,50 @@ fn is_board(p: &Pane) -> bool {
     p.state.is_empty() && (p.program == "switchboard" || p.label == "switchboard")
 }
 
+/// The supervisor and operator panes running with no watch: pane id → how
+/// many events wait for one (watch::unwatched).
+pub type Flags = HashMap<String, usize>;
+
+/// Where P sorts on its card: a supervisor or operator with events waiting
+/// for a watch it doesn't run needs you first (what waits, a blocked agent
+/// say, waits on it); then by state.
+fn needs(p: &Pane, flags: &Flags) -> usize {
+    if flags.get(&p.block_id).is_some_and(|n| *n > 0) {
+        0
+    } else {
+        1 + rank(&p.state)
+    }
+}
+
+/// FLAGS for the panes of SNAP that the board shows: SCOPED to one session
+/// (its id and label), or SNAP's sessions. A scoped exchange's session also
+/// needs every session (FULL) to count its operators' events.
+pub fn flags(home: &Home, snap: &Snapshot, scoped: Option<(&str, &str)>, full: impl Fn() -> Snapshot) -> Flags {
+    let sessions = match scoped {
+        Some((sid, label)) => vec![(sid.to_string(), label.to_string())],
+        None => crate::watch::sessions(snap),
+    };
+    let mut found = crate::watch::unwatched(home, snap, &sessions);
+    if !found.is_empty() && scoped.is_some_and(|(_, label)| home.exchange_exists(label)) {
+        found = crate::watch::unwatched(home, &full(), &sessions);
+    }
+    found.into_iter().map(|(k, v)| (k, v.len())).collect()
+}
+
 /// Lines for one card (a session, or scoped a tab), with a target per line.
 /// Switchboards are left off.
-fn card(number: usize, group: &Group, name: &str, panes: &[Pane], cols: usize, tick: usize, selected: Option<&str>, scoped: bool) -> Lines {
+#[allow(clippy::too_many_arguments)]
+fn card(number: usize, group: &Group, name: &str, panes: &[Pane], cols: usize, tick: usize, selected: Option<&str>, scoped: bool, flags: &Flags) -> Lines {
     let mut panes: Vec<Pane> = panes.iter().filter(|p| !is_board(p)).cloned().collect();
-    panes.sort_by_key(|p| rank(&p.state));
+    panes.sort_by_key(|p| needs(p, flags));
     let top = panes.first().map(|p| p.state.as_str()).unwrap_or("");
-    let edge = if ["blocked", "error", "done", "working"].contains(&top) { color(top).unwrap() } else { FAINT };
+    let edge = if panes.first().is_some_and(|p| flags.get(&p.block_id).is_some_and(|n| *n > 0)) {
+        WARN
+    } else if ["blocked", "error", "done", "working"].contains(&top) {
+        color(top).unwrap()
+    } else {
+        FAINT
+    };
     let inner = cols.saturating_sub(4);
     let mut counts: HashMap<&str, usize> = HashMap::new();
     let mut first_seen = Vec::new();
@@ -308,6 +347,9 @@ fn card(number: usize, group: &Group, name: &str, panes: &[Pane], cols: usize, t
             Span::raw(" "),
             s(word, if is_agent { c } else { MUTED }),
         ];
+        if let Some(n) = flags.get(&p.block_id) {
+            left.push(s(crate::cli::no_watch(*n), WARN));
+        }
         if !p.cwd.is_empty() && p.cwd != home {
             let room = inner as isize - width(&left) as isize - right.chars().count() as isize - 3;
             if room > 6 {
@@ -345,7 +387,9 @@ pub struct Frame {
 
 /// The whole board for DATA (already picked for VIEW). LINK names the exchange
 /// whose switchboard a scoped board links to; LINK_HOT colors it.
-pub fn render(data: &Snapshot, view: &View, cols: usize, tick: usize, selected: Option<&str>, link: &str, link_hot: bool) -> Frame {
+/// FLAGS marks the supervisors and operators running with no watch.
+#[allow(clippy::too_many_arguments)]
+pub fn render(data: &Snapshot, view: &View, cols: usize, tick: usize, selected: Option<&str>, link: &str, link_hot: bool, flags: &Flags) -> Frame {
     let cols = cols.clamp(36, 100);
     let scoped = matches!(view, View::Scoped(..));
     let mut counts: HashMap<&str, usize> = HashMap::new();
@@ -363,6 +407,10 @@ pub fn render(data: &Snapshot, view: &View, cols: usize, tick: usize, selected: 
         }
     }
     let mut pills: Vec<Span<'static>> = Vec::new();
+    let unwatched = data.iter().flat_map(|(_, ps)| ps).filter(|p| flags.contains_key(&p.block_id)).count();
+    if unwatched > 0 {
+        pills.push(s(format!("! {unwatched} no watch"), WARN));
+    }
     for st in status::ORDER {
         if let Some(n) = counts.get(st) {
             if !pills.is_empty() {
@@ -416,7 +464,7 @@ pub fn render(data: &Snapshot, view: &View, cols: usize, tick: usize, selected: 
         targets.push(None);
     }
     for (n, (g, panes)) in numbered(data, view, link) {
-        let (l, t) = card(n, g, &title(&g.label, view), panes, cols, tick, selected, scoped);
+        let (l, t) = card(n, g, &title(&g.label, view), panes, cols, tick, selected, scoped, flags);
         lines.extend(l);
         targets.extend(t);
     }
@@ -617,6 +665,8 @@ struct Shared {
     /// The exchange switchboard a scoped board's link jumps to, once found.
     exchange_board: Option<ExchangeBoard>,
     status: Option<(Color, String, Instant)>,
+    /// Supervisors and operators running with no watch (see Flags).
+    flags: Flags,
 }
 
 struct Board {
@@ -626,6 +676,8 @@ struct Board {
     exchange: String,
     default: String,
     exchanges: Vec<String>,
+    /// Scoped to one session: its full label (`central/stats`).
+    scope_label: Option<String>,
     shared: Arc<Mutex<Shared>>,
     look: Arc<Looker>,
     selected: Option<String>,
@@ -1068,15 +1120,19 @@ fn live(mut board: Board) {
     {
         let (shared, look) = (board.shared.clone(), board.look.clone());
         let scope = board.scope().map(String::from);
+        let scoped = scope.clone().zip(board.scope_label.clone());
         let (ex, default) = (board.exchange.clone(), board.default.clone());
         std::thread::spawn(move || {
+            let home = Home::from_env();
             let mut looked: Option<Instant> = None;
             loop {
                 let fresh = look.snapshot(scope.as_deref());
+                let flags = flags(&home, &fresh, scoped.as_ref().map(|(a, b)| (a.as_str(), b.as_str())), || look.snapshot(None));
                 let client = mux::app_client();
                 {
                     let mut sh = shared.lock().unwrap();
                     sh.data = fresh;
+                    sh.flags = flags;
                     sh.client = client;
                 }
                 if scope.is_some() && looked.is_none_or(|t| t.elapsed() > Duration::from_secs(30)) {
@@ -1122,22 +1178,22 @@ fn live(mut board: Board) {
         let (w, h) = terminal_size();
         board.cols = (w as usize).saturating_sub(2);
         let rows = (h as usize).saturating_sub(1).max(1);
-        let (data, status) = {
+        let (data, status, flags) = {
             let mut sh = board.shared.lock().unwrap();
             if sh.status.as_ref().is_some_and(|(_, _, t)| t.elapsed() > Duration::from_secs(3)) {
                 sh.status = None;
             }
-            (sh.data.clone(), sh.status.as_ref().map(|(c, m, _)| (*c, m.clone())))
+            (sh.data.clone(), sh.status.as_ref().map(|(c, m, _)| (*c, m.clone())), sh.flags.clone())
         };
         loaded = loaded || !data.is_empty() || started.elapsed() > Duration::from_secs(5);
         let shown = pick(&data, &board.view, &board.exchanges);
         let link = board.exchange.clone();
         let frame = if loaded || !shown.is_empty() {
             let hot = board.link_hot();
-            let f = render(&shown, &board.view, board.cols, tick, board.selected.as_deref(), &link, hot);
+            let f = render(&shown, &board.view, board.cols, tick, board.selected.as_deref(), &link, hot, &flags);
             board.targets = f.targets;
             board.keep_selection();
-            render(&shown, &board.view, board.cols, tick, board.selected.as_deref(), &link, hot)
+            render(&shown, &board.view, board.cols, tick, board.selected.as_deref(), &link, hot, &flags)
         } else {
             Frame { lines: vec![Line::from(s("loading…", MUTED))], targets: vec![None] }
         };
@@ -1239,13 +1295,7 @@ pub fn main(args: Vec<String>) {
     let default = home.default_exchange();
     let mut scope: Option<Group> = None;
     if has("--here") {
-        let here = util::env("TMUX_PANE")
-            .and_then(|p| {
-                let (code, out, _) = mux::tmux_s(&["display-message", "-p", "-t", &p, "#{session_id}"]);
-                (code == 0 && !out.trim().is_empty()).then(|| out.trim().to_string())
-            })
-            .or_else(|| util::env("REX_SESSION"))
-            .unwrap_or_else(|| util::die("--here needs a tmux or Rex pane"));
+        let here = status::here_id().unwrap_or_else(|| util::die("--here needs a tmux or Rex pane"));
         scope = Some(status::resolve(&here).unwrap_or_else(|| util::die(format!("no session '{here}'"))));
     } else if let Some(name) = value("--session") {
         scope = Some(status::resolve(&name).unwrap_or_else(|| util::die(format!("no session '{name}'"))));
@@ -1296,9 +1346,11 @@ pub fn main(args: Vec<String>) {
     }
     let look = Looker::new(true);
     if has("--once") {
-        let data = pick(&look.snapshot(scope_id.as_deref()), &view, &exchanges);
+        let snap = look.snapshot(scope_id.as_deref());
+        let flags = flags(&home, &snap, scope.as_ref().map(|g| (g.session_id.as_str(), g.label.as_str())), || look.snapshot(None));
+        let data = pick(&snap, &view, &exchanges);
         let cols = terminal::size().ok().map(|(w, _)| w as usize).or_else(|| util::env("COLUMNS").and_then(|c| c.parse().ok())).unwrap_or(80);
-        print!("{}", ansi(&render(&data, &view, cols, 0, None, &exchange, false).lines));
+        print!("{}", ansi(&render(&data, &view, cols, 0, None, &exchange, false, &flags).lines));
         return;
     }
     // in tmux, mark this pane so others can find the exchange switchboard
@@ -1316,7 +1368,8 @@ pub fn main(args: Vec<String>) {
         exchange,
         default,
         exchanges,
-        shared: Arc::new(Mutex::new(Shared { data: Vec::new(), client: None, exchange_board: None, status: None })),
+        scope_label: scope.as_ref().map(|g| g.label.clone()),
+        shared: Arc::new(Mutex::new(Shared { data: Vec::new(), client: None, exchange_board: None, status: None, flags: Flags::new() })),
         look: Arc::new(look),
         selected: None,
         targets: Vec::new(),
@@ -1396,7 +1449,8 @@ mod tests {
             exchange: "central".into(),
             default: "central".into(),
             exchanges: vec!["central".into()],
-            shared: Arc::new(Mutex::new(Shared { data: Vec::new(), client: None, exchange_board: None, status: None })),
+            scope_label: None,
+            shared: Arc::new(Mutex::new(Shared { data: Vec::new(), client: None, exchange_board: None, status: None, flags: Flags::new() })),
             look: Arc::new(Looker::new(false)),
             selected: None,
             targets: Vec::new(),
@@ -1461,7 +1515,7 @@ mod tests {
             owner: None,
         };
         let data = vec![(Group { session_id: "s".into(), label: "central/stats".into(), mux: "tmux".into(), window_id: None }, vec![p])];
-        let f = render(&data, &View::Exchange("central".into()), 60, 0, None, "central", false);
+        let f = render(&data, &View::Exchange("central".into()), 60, 0, None, "central", false, &Flags::new());
         let text: Vec<String> = f.lines.iter().map(|l| l.spans.iter().map(|s| s.content.to_string()).collect()).collect();
         assert!(text[0].starts_with("◇ switchboard exchange central · projects & agents "));
         assert_eq!(text[1], "✓ 1 done");
@@ -1472,7 +1526,7 @@ mod tests {
         assert_eq!(f.targets[4], Some(Target::Pane("s".into(), "w".into(), "b".into())));
         // a scoped board says whose it is: a project's, the exchange's, or just a session's
         let head = |label: &str, whose| {
-            let f = render(&data, &View::Scoped("s".into(), label.into(), whose), 80, 0, None, "central", false);
+            let f = render(&data, &View::Scoped("s".into(), label.into(), whose), 80, 0, None, "central", false, &Flags::new());
             f.lines[0].spans.iter().map(|s| s.content.to_string()).collect::<String>()
         };
         let h = head("stats", Whose::Project);
@@ -1481,5 +1535,45 @@ mod tests {
         assert!(h.starts_with("◇ switchboard exchange central · tabs & agents"), "{h}");
         let h = head("notes", Whose::Other);
         assert!(h.starts_with("◇ switchboard notes · tabs & agents"), "{h}");
+    }
+
+    /// An operator running with no watch: flagged in the warning colour, and
+    /// with events waiting it needs you, so it heads its card.
+    #[test]
+    fn flags_an_operator_with_no_watch() {
+        let pane = |block: &str, tab: &str, state: &str| Pane {
+            session_id: "s".into(),
+            block_id: block.into(),
+            window_id: format!("w{block}"),
+            tab: tab.into(),
+            label: "shell".into(),
+            program: "claude".into(),
+            cwd: "~/x".into(),
+            state: state.into(),
+            kind: "".into(),
+            msg: "".into(),
+            since: "2m".into(),
+            since_at: String::new(),
+            owner: None,
+        };
+        let data = vec![(
+            Group { session_id: "s".into(), label: "central/stats".into(), mux: "tmux".into(), window_id: None },
+            vec![pane("a", "fix-x", "blocked"), pane("o", "operator", "done")],
+        )];
+        let text = |flags: &Flags| -> (Vec<String>, Vec<Line<'static>>) {
+            let f = render(&data, &View::Exchange("central".into()), 70, 0, None, "central", false, flags);
+            (f.lines.iter().map(|l| l.spans.iter().map(|s| s.content.to_string()).collect()).collect(), f.lines)
+        };
+        let (plain, _) = text(&Flags::new());
+        assert!(plain[4].contains("fix-x") && plain[5].contains("operator") && !plain.iter().any(|l| l.contains("no watch")));
+        let (t, lines) = text(&Flags::from([("o".to_string(), 2)]));
+        assert_eq!(t[1], "! 1 no watch  ◆ 1 blocked  ✓ 1 done");
+        assert!(t[4].contains("operator         done · no watch (2 waiting)"), "{}", t[4]);
+        assert!(t[5].contains("fix-x"));
+        assert!(lines[4].spans.iter().any(|s| s.content.contains("no watch") && s.style.fg == Some(WARN)));
+        assert_eq!(lines[3].spans[0].style.fg, Some(WARN), "the card's edge");
+        // nothing waiting: flagged, but a done operator still sorts as done
+        let (t, _) = text(&Flags::from([("o".to_string(), 0)]));
+        assert!(t[4].contains("fix-x") && t[5].contains("done · no watch") && !t[5].contains("waiting"), "{t:?}");
     }
 }

@@ -60,6 +60,9 @@ exchange), `stats` is its project. `/central/stats` is absolute, `..` goes up.
                                      their agents and their projects' operators); --next: wait for
                                      the first event, print it and exit (run it in the background
                                      and again after each event: none is missed or repeated)
+  watch --check                      whether a watch runs for this session, and what's waiting
+                                     for it (the Stop hook of the supervisors and operators cbar
+                                     starts: it tells one whose turn ends with no watch)
   board [EXCHANGE|PROJECT] [--all]   that exchange's or project's switchboard (default: this
                                      exchange's; --all: every exchange; --once prints once, --json
                                      prints JSON)
@@ -87,7 +90,7 @@ pub fn main(args: Vec<String>) {
         "wait" => cmd_wait(&home, rest),
         "restart" => cmd_restart(&home, rest),
         "rm" => cmd_rm(&home, rest),
-        "watch" => cmd_watch(rest),
+        "watch" => cmd_watch(&home, rest),
         "board" => cmd_board(&home, rest),
         "run" => cmd_run(&home, rest),
         "update" => cmd_update(&home),
@@ -490,12 +493,24 @@ fn cmd_run(home: &Home, mut args: Vec<String>) {
     }
 }
 
-/// Run Claude named NAME with PROMPT appended to its system prompt.
+/// Run a supervisor's or operator's Claude, named NAME, with PROMPT appended
+/// to its system prompt and crossbar's watch guard (see watch_guard).
 fn claude(name_prompt: &[String; 2], more: &[String], pane: bool) -> ! {
     let (mut argv, envs) = launch::claude_cmd();
     argv.extend(["-n".to_string(), name_prompt[0].clone(), "--append-system-prompt".into(), name_prompt[1].clone()]);
+    argv.extend(["--settings".to_string(), watch_guard()]);
     argv.extend_from_slice(more);
     launch::run(&argv, &envs, pane)
+}
+
+/// The settings crossbar gives the supervisors and operators it starts (and
+/// restarts): only a Stop hook that runs `cbar watch --check`, so a Claude
+/// whose turn ends with no watch running is told so, with what is waiting.
+/// `--settings` adds to the user's and the project's settings: hooks from
+/// every source run, none replaces another's.
+pub fn watch_guard() -> String {
+    let cmd = format!("{} watch --check", launch::show(&[launch::self_exe().to_string_lossy().into_owned()]));
+    serde_json::json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": cmd, "timeout": 60}]}]}}).to_string()
 }
 
 fn switchboard_path() -> String {
@@ -652,7 +667,19 @@ fn up_one(all: &[Flat], name: &str, dir: &str, term: Term, role: &str, path: &st
 
 struct Tree<'a> {
     all: &'a [Flat],
+    /// Supervisor and operator panes running with no watch: pane id → what's waiting.
+    unwatched: &'a std::collections::HashMap<String, Vec<String>>,
     rows: Vec<Vec<String>>,
+}
+
+/// What a supervisor's or operator's row says after its state when no watch
+/// runs for it (with N events waiting for one).
+pub fn no_watch(n: usize) -> String {
+    if n == 0 {
+        " · no watch".into()
+    } else {
+        format!(" · no watch ({n} waiting)")
+    }
 }
 
 impl Tree<'_> {
@@ -671,8 +698,10 @@ impl Tree<'_> {
         let st = if in_tab.is_empty() {
             format!("no {tab} tab")
         } else {
-            let s = in_tab.iter().find(|f| f.pane.label != "switchboard").map(|f| f.pane.state.clone()).unwrap_or_default();
-            format!("{tab} {}", if s.is_empty() { "not running".into() } else { s })
+            let claude = in_tab.iter().find(|f| f.pane.label != "switchboard");
+            let s = claude.map(|f| f.pane.state.clone()).unwrap_or_default();
+            let flag = claude.and_then(|f| self.unwatched.get(&f.pane.block_id)).map(|w| no_watch(w.len())).unwrap_or_default();
+            format!("{tab} {}{flag}", if s.is_empty() { "not running".into() } else { s })
         };
         (session, st)
     }
@@ -748,8 +777,10 @@ fn cmd_ls(home: &Home, args: Vec<String>) {
         println!("no exchanges yet (cbar new NAME [DIR] makes a project in '{}')", home.default_exchange());
         return;
     }
-    let all = status::flatten(Looker::new(false).snapshot(None));
-    let mut tree = Tree { all: &all, rows: vec![strings(&["NAME", "TERMINAL", "PATH", "SESSION", "CLAUDE"])] };
+    let snap = Looker::new(false).snapshot(None);
+    let unwatched = crate::watch::unwatched(home, &snap, &crate::watch::sessions(&snap));
+    let all = status::flatten(snap);
+    let mut tree = Tree { all: &all, unwatched: &unwatched, rows: vec![strings(&["NAME", "TERMINAL", "PATH", "SESSION", "CLAUDE"])] };
     match &node {
         None | Some(Node::Root) => {
             for x in &exchanges {
@@ -1277,10 +1308,13 @@ fn merged(repo: &Path, wt: &Path, branch: &str) -> bool {
 
 // ---- watch, board ------------------------------------------------------------
 
-fn cmd_watch(args: Vec<String>) {
-    let a = parse(&args, &["--next"], "cbar watch [--next]");
-    if !a.pos.is_empty() {
-        die("usage: cbar watch [--next]");
+fn cmd_watch(home: &Home, args: Vec<String>) {
+    let a = parse(&args, &["--next", "--check"], "cbar watch [--next|--check]");
+    if !a.pos.is_empty() || (a.has("--next") && a.has("--check")) {
+        die("usage: cbar watch [--next|--check]");
+    }
+    if a.has("--check") {
+        return watch_check(home);
     }
     if mux::here_terminal().is_none() {
         die("run this inside a project's or an exchange's tmux or Rex pane");
@@ -1290,6 +1324,38 @@ fn cmd_watch(args: Vec<String>) {
         argv.push("--next".into());
     }
     launch::run(&argv, &[], false)
+}
+
+/// cbar watch --check: the Stop hook crossbar gives the supervisors and
+/// operators it starts (see watch_guard). Its input, the hook's JSON, comes
+/// on stdin. If no watch runs for this pane's session, it blocks the stop
+/// with why (the reason Claude reads next); else it says nothing. Anything
+/// in the way (not in a pane, no such session) lets the turn end. Run by
+/// hand (stdin a terminal), it says what it found and exits 1 if no watch runs.
+fn watch_check(home: &Home) {
+    let by_hand = std::io::stdin().is_terminal();
+    let input: serde_json::Value = if by_hand {
+        serde_json::json!({})
+    } else {
+        let mut text = String::new();
+        let _ = std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut text);
+        serde_json::from_str(&text).unwrap_or_default()
+    };
+    let Some(g) = status::here_id().and_then(|id| status::resolve(&id)) else {
+        if by_hand {
+            die("run this inside a project's or an exchange's tmux or Rex pane");
+        }
+        return;
+    };
+    match crate::watch::check(home, &g, &input) {
+        None if by_hand => println!("cbar watch is running for {}", g.label),
+        None => {}
+        Some(why) if by_hand => {
+            println!("{why}");
+            std::process::exit(1)
+        }
+        Some(why) => println!("{}", serde_json::json!({"decision": "block", "reason": why})),
+    }
 }
 
 fn cmd_board(home: &Home, args: Vec<String>) {
@@ -1359,6 +1425,21 @@ fn cmd_update(home: &Home) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The settings a supervisor or operator starts with: one Stop hook,
+    /// this cbar's `watch --check`, and nothing else.
+    #[test]
+    fn the_watch_guard_is_only_a_stop_hook() {
+        let v: serde_json::Value = serde_json::from_str(&watch_guard()).unwrap();
+        assert_eq!(v.as_object().unwrap().keys().collect::<Vec<_>>(), ["hooks"]);
+        assert_eq!(v["hooks"].as_object().unwrap().keys().collect::<Vec<_>>(), ["Stop"]);
+        let hook = &v["hooks"]["Stop"][0]["hooks"][0];
+        assert_eq!(hook["type"], "command");
+        let cmd = hook["command"].as_str().unwrap();
+        assert!(cmd.ends_with(" watch --check") && cmd.contains(&*launch::self_exe().to_string_lossy()), "{cmd}");
+        assert_eq!(no_watch(0), " · no watch");
+        assert_eq!(no_watch(2), " · no watch (2 waiting)");
+    }
 
     fn flat(tab: &str, label: &str, program: &str, state: &str, id: &str) -> Flat {
         Flat {

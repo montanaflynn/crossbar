@@ -16,6 +16,12 @@
 //! and whatever else comes within a second, and exits 0; a report that
 //! stands blocked or in error is not printed again once a watch printed it.
 //! Run one after another, they print every event once.
+//!
+//! A done line just like the last one printed for its pane (same state,
+//! kind and message, from the same Claude) is not printed again, however
+//! many turns end on it: the ledger keeps that line through the looks in
+//! between and across runs. A stop or a close is still printed, and drops
+//! it, so what the pane says next is news.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -60,6 +66,48 @@ struct Seen {
     /// Whether a watch printed it as it is.
     #[serde(default = "yes")]
     printed: bool,
+    /// The last done line a watch printed for this pane, kept through the
+    /// looks in between (its turns' working) until the pane stops or closes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    said: Option<Said>,
+}
+
+/// A done line as printed: its state, kind and message, and which process
+/// reported it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct Said {
+    state: String,
+    #[serde(default)]
+    kind: String,
+    msg: String,
+    #[serde(default)]
+    owner: Option<i64>,
+}
+
+impl Said {
+    fn of(r: &Report) -> Said {
+        Said { state: r.state.clone(), kind: r.kind.clone(), msg: r.msg.clone(), owner: r.owner }
+    }
+
+    /// Whether printing R would say this again: the same line from the same
+    /// Claude (a new process in the pane is a new Claude, so news).
+    fn repeats(&self, r: &Report) -> bool {
+        let same_owner = match (self.owner, r.owner) {
+            (Some(a), Some(b)) => a == b,
+            _ => true,
+        };
+        (&self.state, &self.kind, &self.msg) == (&r.state, &r.kind, &r.msg) && same_owner
+    }
+}
+
+impl Seen {
+    /// The last done line printed for its pane (a ledger of 0.5.6 or
+    /// earlier has only the entry itself, if it was a printed done).
+    fn said(&self) -> Option<Said> {
+        self.said.clone().or_else(|| {
+            (self.printed && self.state == "done").then(|| Said { state: self.state.clone(), kind: self.kind.clone(), msg: self.msg.clone(), owner: self.owner })
+        })
+    }
 }
 
 fn yes() -> bool {
@@ -130,13 +178,25 @@ impl Ledger {
         }
     }
 
-    fn entry(r: &Report, printed: bool) -> Seen {
-        Seen { name: r.name.clone(), state: r.state.clone(), kind: r.kind.clone(), msg: r.msg.clone(), since: r.since.clone(), owner: r.owner, printed }
+    fn entry(r: &Report, printed: bool, said: Option<Said>) -> Seen {
+        Seen { name: r.name.clone(), state: r.state.clone(), kind: r.kind.clone(), msg: r.msg.clone(), since: r.since.clone(), owner: r.owner, printed, said }
     }
 
     /// A watch printed R (in pane KEY) as it is now.
     fn printed(&mut self, key: &str, r: &Report) {
-        self.seen.insert(key.to_string(), Ledger::entry(r, true));
+        let said = if r.state == "done" { Some(Said::of(r)) } else { self.said(key) };
+        self.seen.insert(key.to_string(), Ledger::entry(r, true, said));
+    }
+
+    /// The last done line a watch printed for pane KEY.
+    fn said(&self, key: &str) -> Option<Said> {
+        self.seen.get(key).and_then(Seen::said)
+    }
+
+    /// Whether R in pane KEY is a done line just like the last one printed
+    /// there: noise, not news.
+    fn repeats(&self, key: &str, r: &Report) -> bool {
+        r.state == "done" && self.said(key).is_some_and(|s| s.repeats(r))
     }
 
     /// Whether a watch already printed R as it is now.
@@ -157,9 +217,11 @@ impl Ledger {
     }
 
     /// Keep what the watch knows now (LAST, the tracker's) and save it if
-    /// that changed. A report that stopped or closed is dropped.
+    /// that changed. A report that stopped or closed is dropped, and with it
+    /// the last line printed for its pane.
     fn sync(&mut self, last: &HashMap<String, Report>) {
-        let now: HashMap<String, Seen> = last.iter().filter(|(_, r)| !r.state.is_empty()).map(|(k, r)| (k.clone(), Ledger::entry(r, self.knows(r)))).collect();
+        let now: HashMap<String, Seen> =
+            last.iter().filter(|(_, r)| !r.state.is_empty()).map(|(k, r)| (k.clone(), Ledger::entry(r, self.knows(r), self.said(k)))).collect();
         self.seen = now;
         if self.seen != self.saved {
             self.save();
@@ -331,6 +393,8 @@ impl Watch {
         for key in quiet {
             self.tracker.pending.insert(key, now);
         }
+        // a turn that ends on the done line printed last for its pane is no news
+        events.retain(|(key, r, state)| *state != r.state || !self.ledger.repeats(key, r));
         events
     }
 
@@ -571,6 +635,99 @@ mod tests {
             w.record(&e);
             assert_eq!(events(e), want);
         }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Each look of LOOKS through W (recorded as printed), and what it printed.
+    fn through(w: &mut Watch, looks: &[HashMap<String, Report>], alive: &dyn Fn(i64) -> bool) -> Vec<String> {
+        let mut said = Vec::new();
+        for cur in looks {
+            let e = w.look(cur, Instant::now(), alive);
+            w.record(&e);
+            said.extend(events(e));
+        }
+        said
+    }
+
+    fn one(state: &str, msg: &str, since: &str, owner: i64) -> HashMap<String, Report> {
+        HashMap::from([("%1".to_string(), report("ops", state, msg, since, Some(owner)))])
+    }
+
+    /// An operator ends turn after turn on the same summary: printed once.
+    #[test]
+    fn the_same_done_across_turns_prints_once() {
+        let path = std::env::temp_dir().join(format!("cbar-watch-same-{}/x.json", std::process::id()));
+        let mut w = Watch::new(Ledger::load(path.clone()), false);
+        let looks = [
+            one("working", "", "t0", 1),
+            one("done", "waits on push", "t1", 1),
+            one("working", "", "t2", 1),
+            one("done", "waits on push", "t3", 1),
+            one("working", "", "t4", 1),
+            one("done", "waits on push", "t5", 1),
+        ];
+        assert_eq!(through(&mut w, &looks, &|_| true), vec!["ops: done — waits on push"]);
+        // a new message is news, and so is the old one after it
+        let looks = [one("working", "", "t6", 1), one("done", "pushed", "t7", 1), one("working", "", "t8", 1), one("done", "waits on push", "t9", 1)];
+        assert_eq!(through(&mut w, &looks, &|_| true), vec!["ops: done — pushed", "ops: done — waits on push"]);
+        // so is a block, and a block again (a new since) as before
+        let looks = [one("blocked", "allow?", "t10", 1), one("working", "", "t11", 1), one("blocked", "allow?", "t12", 1)];
+        assert_eq!(through(&mut w, &looks, &|_| true), vec!["ops: blocked (permission) — allow?", "ops: blocked (permission) — allow?"]);
+        // and the done line printed before the blocks is still the last one
+        assert!(through(&mut w, &[one("working", "", "t13", 1), one("done", "waits on push", "t14", 1)], &|_| true).is_empty());
+        // a plain watch started later doesn't print it either
+        let mut w = Watch::new(Ledger::load(path.clone()), false);
+        assert!(through(&mut w, &[one("done", "waits on push", "t15", 1)], &|_| true).is_empty());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// The same summary in two `cbar watch --next` runs: the second waits.
+    #[test]
+    fn the_same_done_across_next_runs_prints_once() {
+        let path = std::env::temp_dir().join(format!("cbar-watch-same-next-{}/x.json", std::process::id()));
+        let alive = |_: i64| true;
+        let done = |since: &str, msg: &str| one("done", msg, since, 1);
+        assert_eq!(next_run(&path, &mut vec![done("t1", "no agents"); 3].into_iter(), &alive), Some(vec!["ops: done — no agents".to_string()]));
+        // a turn between the runs, and one while the next runs, both ending the same
+        let mut looks = vec![done("t3", "no agents"), one("working", "", "t4", 1), done("t5", "no agents")].into_iter().cycle().take(60);
+        assert_eq!(next_run(&path, &mut looks, &alive), None);
+        // a new message wakes it
+        assert_eq!(next_run(&path, &mut vec![done("t7", "one agent"); 3].into_iter(), &alive), Some(vec!["ops: done — one agent".to_string()]));
+        // a new Claude in the pane (between runs) saying what the old one said last is news
+        assert_eq!(next_run(&path, &mut vec![one("done", "one agent", "t9", 2); 3].into_iter(), &alive), Some(vec!["ops: done — one agent".to_string()]));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A stop after a repeat that wasn't printed is printed, and what the
+    /// pane says when it comes back (or after it closed) is news again.
+    #[test]
+    fn a_stop_after_a_repeat_prints() {
+        let path = std::env::temp_dir().join(format!("cbar-watch-same-stop-{}/x.json", std::process::id()));
+        let mut w = Watch::new(Ledger::load(path.clone()), false);
+        let looks = [one("working", "", "t0", 1), one("done", "ok", "t1", 1), one("working", "", "t2", 1), one("done", "ok", "t3", 1)];
+        assert_eq!(through(&mut w, &looks, &|_| true), vec!["ops: done — ok"]);
+        assert_eq!(through(&mut w, &[one("", "", "", 1)], &|_| false), vec!["ops: stopped"]);
+        // a Claude started again says what it said: news
+        assert_eq!(through(&mut w, &[one("working", "", "t4", 1), one("done", "ok", "t5", 1)], &|_| true), vec!["ops: done — ok"]);
+        // closed, and a pane by the same id later: news too
+        let gone = HashMap::new();
+        assert_eq!(through(&mut w, &[gone.clone(), gone], &|_| true), vec!["ops: closed — ok"]);
+        assert_eq!(through(&mut w, &[one("working", "", "t6", 1), one("done", "ok", "t7", 1)], &|_| true), vec!["ops: done — ok"]);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A ledger written by 0.5.6 (by pane, no last line): read, and a done
+    /// it printed counts as the last line printed there.
+    #[test]
+    fn reads_a_0_5_6_ledger() {
+        let path = std::env::temp_dir().join(format!("cbar-watch-056-{}/x.json", std::process::id()));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let old = r#"{"%1": {"name": "ops", "state": "done", "kind": "", "msg": "ok", "since": "t1", "owner": 1, "printed": true},
+                      "%2": {"name": "b", "state": "working", "kind": "", "msg": "", "since": "t1", "owner": 2, "printed": false}}"#;
+        std::fs::write(&path, old).unwrap();
+        let cur = HashMap::from([("%1".to_string(), report("ops", "done", "ok", "t2", Some(1))), ("%2".to_string(), report("b", "done", "fine", "t2", Some(2)))]);
+        let mut w = Watch::new(Ledger::load(path.clone()), true);
+        assert_eq!(through(&mut w, &[cur], &|_| true), vec!["b: done — fine"]);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

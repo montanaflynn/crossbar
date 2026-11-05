@@ -15,9 +15,10 @@ look or two, and the pane, once closed, "closed".
 
 Before that, `cbar watch --next` in alpha's operator pane, run after run:
 the first exits at once on what stands; one with nothing new waits, silently,
-until an agent turns done; what happens while none runs (a done, a block, a
-Claude that quits, a closed tab) is printed by the next run, and nothing by
-the one after. Prints one line per check; exits 1 if any fails.
+until an agent turns done, and through a turn that ends on the line printed
+last for its pane; what happens while none runs (a done, a block, a Claude
+that quits, a closed tab) is printed by the next run, and nothing by the one
+after. Prints one line per check; exits 1 if any fails.
 """
 import argparse
 import importlib.machinery
@@ -124,6 +125,17 @@ def next_cases(side):
     side.mux.send_line(*chat, "ping")
     check("an event exits it", exited(p, 20), open(log).read().strip())
     check("it printed the event", lines(log) == ["t-chat: done — did: ping"], lines(log))
+    stop(p)
+
+    # 2b: t-chat's next turn ends on the same line: no news, so it waits; a new line is news
+    p, log = start()
+    side.mux.send_line(*chat, "ping")
+    time.sleep(12)   # working, and done again with the same message
+    check("a turn ending as the last one did doesn't exit --next", p.poll() is None, f"exit {p.poll()}: {open(log).read().strip()}")
+    check("and isn't printed again", lines(log) == [], lines(log))
+    side.mux.send_line(*chat, "pong")
+    check("a new message exits it", exited(p, 20), open(log).read().strip())
+    check("it printed the new line only", lines(log) == ["t-chat: done — did: pong"], lines(log))
     stop(p)
 
     # 3: while no watch runs: t-busy turns done, t-chat blocked, t-boom's Claude quits, t-done closes

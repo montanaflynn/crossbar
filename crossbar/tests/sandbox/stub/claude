@@ -3,7 +3,7 @@
 # never starts a real Claude.
 #
 #   claude agents --json     prints [] (the switchboards ask this in tmux)
-#   claude -n NAME [-w WT] [--append-system-prompt P] [--resume ID] [PROMPT]
+#   claude -n NAME [-w WT] [--append-system-prompt P] [--settings JSON] [--resume ID] [PROMPT]
 #
 # It reports its state as Claude does, with OSC 7501 (Rex reads it; in tmux,
 # claude-relay turns it into pane options). The state comes from the brief the
@@ -11,6 +11,12 @@
 # `stub: STATE [KIND] [| MESSAGE]`. Without one it is idle. Then each line typed
 # into it makes it work for $CBAR_STUB_WORK seconds (default 2) and finish
 # done with "did: LINE"; a typed `/state STATE [KIND] [| MESSAGE]` sets that state.
+#
+# Started with --settings holding a Stop hook (crossbar's watch guard), it runs
+# the hook's command as Claude Code does each time a turn ends, Stop hook input
+# on stdin. If the hook blocks, it prints `stop hook: REASON` and runs it again
+# with stop_hook_active true, as Claude Code would at the end of the turn that
+# follows; if that blocks too, it prints `stop hook blocked again`.
 #
 # For the cbar restart tests (tests/sandbox/restart.rs), off unless asked for:
 #   $CBAR_STUB_LOG       a folder: each start writes its argv there, NUL-separated,
@@ -43,13 +49,14 @@ if [ -n "$CBAR_STUB_LOG" ]; then
   mkdir -p "$CBAR_STUB_LOG"
   printf '%s\0' "$@" > "$CBAR_STUB_LOG/.argv.$$"
 fi
-name= wt=- prompt= resume=
+name= wt=- prompt= resume= settings=
 while [ $# -gt 0 ]; do
   case $1 in
     -n) name=$2; shift ;;
     -w) wt=$2; shift ;;
     --append-system-prompt) shift ;;
     --resume) resume=$2; shift ;;
+    --settings) settings=$2; shift ;;
     *) prompt=$1 ;;
   esac
   shift
@@ -130,6 +137,30 @@ ask_worktree() {
   echo "  Enter to confirm · Esc to cancel"
 }
 
+# the Stop hook's command, from --settings
+hook=$(printf '%s' "$settings" | sed -n 's/.*"Stop".*"command":"\([^"]*\)".*/\1/p')
+
+# stop_hook ACTIVE: run the Stop hook (stop_hook_active ACTIVE); 1 if it blocked
+stop_hook() {
+  [ -n "$hook" ] || return 0
+  out=$(printf '{"hook_event_name":"Stop","stop_hook_active":%s,"background_tasks":[]}' "$1" | sh -c "$hook" 2>/dev/null)
+  case $out in
+    *'"decision":"block"'*)
+      reason=$(printf '%s' "$out" | sed -n 's/.*"reason":"\(.*\)"}.*/\1/p')
+      [ "$1" = false ] && echo "stop hook: $reason"
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+# a turn ends: Stop hooks
+turn_end() {
+  if ! stop_hook false; then
+    stop_hook true || echo "stop hook blocked again"
+  fi
+}
+
 deaf= asking= bg=
 trap quit HUP TERM INT
 while IFS= read -r line; do
@@ -173,12 +204,14 @@ while IFS= read -r line; do
       emit working
       sh -c "${line#/sh }"
       emit "done | ran: ${line#/sh }"
+      turn_end
       ;;
     '') ;;
     *)
       emit working
       sleep "${CBAR_STUB_WORK:-2}"
       emit "done | did: $line"
+      turn_end
       ;;
   esac
 done

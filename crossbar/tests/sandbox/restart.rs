@@ -201,6 +201,14 @@ impl World<'_> {
             let p = arg_after(&argv, "--append-system-prompt");
             s.check(format!("{label}: with the current role prompt"), p.is_some_and(|p| p.starts_with(mark)), p.unwrap_or("none").chars().take(80).collect::<String>());
         }
+        // a supervisor or operator gets its watch guard (the Stop hook) again; an agent never has one
+        let guard = arg_after(&argv, "--settings");
+        let role = name.ends_with("operator") || name.ends_with("supervisor");
+        s.check(
+            format!("{label}: {}", if role { "with its watch guard" } else { "no watch guard" }),
+            if role { guard.is_some_and(|g| g.contains("\"Stop\"") && g.contains(" watch --check")) } else { guard.is_none() },
+            guard.unwrap_or("none"),
+        );
         if let Some(flag) = want.worktree_flag {
             s.check(format!("{label}: no -w (already in its worktree)"), argv.iter().any(|a| a == "-w") == flag, argv.join(" "));
         }

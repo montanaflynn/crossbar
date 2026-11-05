@@ -37,6 +37,7 @@ fn run(rex: bool) {
     let Some(mut s) = Sandbox::new("watch", rex) else { return };
     s.setup();
     next_cases(&s);
+    guard_cases(&s);
     cases(&s);
     s.finish();
 }
@@ -149,6 +150,73 @@ fn next_cases(s: &Sandbox) {
     p.stop();
     let errs: String = logs.iter().map(|l| read(l.with_extension("err"))).collect();
     s.check("--next wrote no errors", errs.trim().is_empty(), errs.trim());
+}
+
+/// The watch guard, after next_cases (whose runs printed all that stood):
+/// with no watch running, `cbar ls` and both switchboards flag alpha's
+/// operator, with the events waiting for it, and its Stop hook (the stub runs
+/// it as Claude Code does) tells it so at the end of its turn, once. While a
+/// `cbar watch --next` runs, none of that; once the watch is killed, it's back.
+fn guard_cases(s: &Sandbox) {
+    let busy = agent_pane(s, "t-busy");
+    s.send_line(&busy.0, &busy.1, "again");
+    let alpha = s.session(Some("alpha"));
+    let done = wait_for(20.0, || s.panes().iter().any(|p| p.session == alpha && p.tab == "t-busy" && p.state == "done" && s.screen(&busy.0, &busy.1).contains("> again")));
+    s.check("guard: t-busy is done again", done, "");
+    sleep(1.0);
+    let waiting = "t-busy: done — did: again";
+
+    let ls = s.cbar(&["ls"], None);
+    let row = |name: &str| ls.out.lines().find(|l| l.trim_start_matches(['├', '└', '─', ' ']).starts_with(name)).unwrap_or("").to_string();
+    s.check("guard: ls flags alpha's operator, with what waits", row("alpha").contains("operator idle · no watch (1 waiting)"), row("alpha"));
+    s.check("guard: and the supervisor (nothing waits)", row(EXCHANGE).ends_with("supervisor idle · no watch"), row(EXCHANGE));
+    s.check("guard: never an agent", !ls.out.lines().any(|l| l.contains("t-") && l.contains("no watch")), &ls.out);
+    let board = s.run(&["switchboard", "--session", &alpha, "--once"], None, 60.0);
+    s.check("guard: the project switchboard flags it", board.out.contains("no watch (1 waiting)") && board.out.contains("1 no watch"), &board.out);
+    let board = s.run(&["switchboard", "--exchange", EXCHANGE, "--once"], None, 60.0);
+    s.check("guard: the exchange switchboard flags all three", board.out.contains("3 no watch") && board.out.contains("no watch (1 waiting)"), &board.out);
+
+    let check = s.cbar(&["watch", "--check"], Some("alpha"));
+    let v: serde_json::Value = serde_json::from_str(check.out.trim()).unwrap_or_default();
+    let reason = v["reason"].as_str().unwrap_or("");
+    s.check("guard: the Stop hook blocks", check.code == 0 && v["decision"] == "block", check.to_string());
+    let want = format!("cbar watch isn't running for {alpha}; 1 event is waiting: {waiting}. Start `cbar watch --next` as a background Bash command");
+    s.check("guard: saying what waits", reason.starts_with(&want), reason);
+
+    // the operator's turn ends: its Stop hook (crossbar's, from --settings) tells it, once
+    let (osid, opane) = s.panes_at["alpha"].clone();
+    s.send_line(&osid, &opane, "hello");
+    // (the pane wraps the long line)
+    let told = wait_for(30.0, || s.screen(&osid, &opane).replace('\n', "").contains(&format!("stop hook: {want}")));
+    s.check("guard: the operator is told when its turn ends", told, last(&s.screen(&osid, &opane), 600));
+    sleep(3.0);
+    s.check("guard: once a turn (stop_hook_active)", !s.screen(&osid, &opane).contains("blocked again"), last(&s.screen(&osid, &opane), 600));
+
+    // it starts a watch: the first run prints what waits and exits; the next one waits, and holds the lease
+    let mut p = s.spawn(&["cbar", "watch", "--next"], Some("alpha"), &[], &s.root.join("guard-1.out"));
+    s.check("guard: a --next prints what waited", p.exits_ok(20.0) && p.lines() == strings(&[waiting]), p.text().trim());
+    let mut p = s.spawn(&["cbar", "watch", "--next"], Some("alpha"), &[], &s.root.join("guard-2.out"));
+    let quiet = wait_for(20.0, || s.cbar(&["watch", "--check"], Some("alpha")).out.trim().is_empty());
+    s.check("guard: while a watch runs, the Stop hook says nothing", quiet && p.running(), s.cbar(&["watch", "--check"], Some("alpha")).to_string());
+    let ls = s.cbar(&["ls"], None);
+    let alpha_row = ls.out.lines().find(|l| l.contains("alpha")).unwrap_or("").to_string();
+    s.check("guard: nor does ls", alpha_row.contains("operator done") && !alpha_row.contains("no watch"), &alpha_row);
+    let before = s.screen(&osid, &opane).matches("stop hook:").count();
+    s.send_line(&osid, &opane, "hello again");
+    let turned = wait_for(30.0, || s.screen(&osid, &opane).contains("did: hello again") || s.screen(&osid, &opane).contains("> hello again"));
+    sleep(5.0);
+    let after = s.screen(&osid, &opane).matches("stop hook:").count();
+    s.check("guard: and its turn ends without a word", turned && after == before, last(&s.screen(&osid, &opane), 600));
+
+    // the watch is killed (no exit of its own, its lease left behind): no watch again
+    unsafe { libc::kill(-(p.child.id() as i32), libc::SIGKILL) };
+    let _ = p.child.wait();
+    let check = s.cbar(&["watch", "--check"], Some("alpha"));
+    let v: serde_json::Value = serde_json::from_str(check.out.trim()).unwrap_or_default();
+    let reason = v["reason"].as_str().unwrap_or("");
+    s.check("guard: a killed watch is no watch", reason.starts_with(&format!("cbar watch isn't running for {alpha}; no events are waiting yet.")), check.to_string());
+    let errs = read(s.root.join("guard-1.err")) + &read(s.root.join("guard-2.err"));
+    s.check("guard: the watches wrote no errors", errs.trim().is_empty(), errs.trim());
 }
 
 fn cases(s: &Sandbox) {

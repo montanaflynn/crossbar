@@ -28,6 +28,10 @@ printed isn't printed again; `cbar ls .` shows what stands now. While it
 waits there is nothing to do: don't narrate starting it again, and don't
 tell the user that nothing happened. Only events are worth mentioning.
 
+crossbar notices when no watch runs: `cbar ls` and the switchboards flag
+you, and at the end of a turn it tells you what is waiting. When it does,
+start `cbar watch --next` again and act on what it lists.
+
 ## Doing the work
 
 - Hand the work to agents in tabs of this session; you plan, watch,

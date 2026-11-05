@@ -110,9 +110,10 @@ cbar rm [-y] [-f] PATH                 an agent: close its tab, and remove its w
                                        uncommitted changes, unless -f); a project or an exchange:
                                        kill its session and unregister it, briefs and reports too
                                        (asks first)
-cbar watch [--next]                    a line each time one of your agents or operators turns
+cbar watch [--next|--check]            a line each time one of your agents or operators turns
                                        done, blocked or error, stops or closes (--next: wait for
-                                       the first event, print it and exit)
+                                       the first event, print it and exit; --check: whether one
+                                       runs for this session, and what's waiting for it)
 cbar board [EXCHANGE|PROJECT] [--all]  the switchboard (--once prints once, --json prints JSON)
 cbar update | version | help
 ```
@@ -125,6 +126,17 @@ background Bash command: it waits, silently, for the first event, prints it (and
 happens within a second), and exits; they act on it and start it again. Run one after another,
 the runs print every event once, and a blocked or errored report once printed isn't printed
 again. What each watch knew is kept in `~/.crossbar/watch/<session>.json`.
+
+A missed re-run leaves a supervisor or operator deaf, so crossbar notices. While a watch
+runs it holds a lease in `~/.crossbar/watch/<session>.live/` (a locked file that goes with
+the process, so a killed watch holds none). When a supervisor's or operator's Claude runs
+with no watch, `cbar ls` says so on its row (`operator done · no watch (2 waiting)`), and
+the switchboards flag it in yellow, first on its card while events wait. Agents are never
+flagged. The supervisors and operators cbar starts also get a Stop hook, passed with
+`claude --settings` and added to your own settings and hooks, never replacing them. At
+the end of each turn it runs `cbar watch --check`. If no watch runs, it keeps Claude going
+once with what's waiting and the command to start. `cbar restart` passes the hook again.
+Run `cbar watch --check` yourself in a pane to see what it finds.
 
 The panes cbar makes run `cbar run supervisor|operator|board|agent` as their own command, so
 nothing is typed into a shell. When that program exits, the pane drops to your login shell.

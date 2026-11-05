@@ -55,9 +55,11 @@ exchange), `stats` is its project. `/central/stats` is absolute, `..` goes up.
                                      merged (refuses while it works, is blocked or has uncommitted
                                      changes, unless -f); a project or an exchange: kill its
                                      session and unregister it, briefs and reports too (asks first)
-  watch                              a line each time one of your reports turns done, blocked or
+  watch [--next]                     a line each time one of your reports turns done, blocked or
                                      error, stops or closes (operators: their agents; supervisors:
-                                     their agents and their projects' operators)
+                                     their agents and their projects' operators); --next: wait for
+                                     the first event, print it and exit (run it in the background
+                                     and again after each event: none is missed or repeated)
   board [EXCHANGE|PROJECT] [--all]   that exchange's or project's switchboard (default: this
                                      exchange's; --all: every exchange; --once prints once, --json
                                      prints JSON)
@@ -85,7 +87,7 @@ pub fn main(args: Vec<String>) {
         "wait" => cmd_wait(&home, rest),
         "restart" => cmd_restart(&home, rest),
         "rm" => cmd_rm(&home, rest),
-        "watch" => cmd_watch(),
+        "watch" => cmd_watch(rest),
         "board" => cmd_board(&home, rest),
         "run" => cmd_run(&home, rest),
         "update" => cmd_update(&home),
@@ -979,7 +981,7 @@ fn cmd_restart(home: &Home, args: Vec<String>) {
         util::warn(format!("could not type /exit: {e}"));
     }
     // Claude may ask on /exit: a -w Claude whether to keep its worktree (keep
-    // it), one with background work (a cbar watch Monitor) whether to stop it
+    // it), one with background work (a background cbar watch --next) whether to stop it
     // (exit and stop it); each is answered once, with Enter on that choice
     let until = Instant::now() + Duration::from_secs(20);
     let (mut kept, mut stopped) = (false, false);
@@ -1045,7 +1047,7 @@ fn cmd_restart(home: &Home, args: Vec<String>) {
     let why = if role == "agent" {
         format!("crossbar restarted you on {} (cbar restart, same conversation); carry on with your task.", env!("CARGO_PKG_VERSION"))
     } else {
-        format!("crossbar restarted you on {} with the current {role} prompt (cbar restart, same conversation); re-arm cbar watch and carry on.", env!("CARGO_PKG_VERSION"))
+        format!("crossbar restarted you on {} with the current {role} prompt (cbar restart, same conversation); start `cbar watch --next` in the background again and carry on.", env!("CARGO_PKG_VERSION"))
     };
     if let Err(e) = mux::send_line(t.term, &session, &pane, &why) {
         util::warn(format!("could not tell it why: {e}"));
@@ -1275,11 +1277,19 @@ fn merged(repo: &Path, wt: &Path, branch: &str) -> bool {
 
 // ---- watch, board ------------------------------------------------------------
 
-fn cmd_watch() {
+fn cmd_watch(args: Vec<String>) {
+    let a = parse(&args, &["--next"], "cbar watch [--next]");
+    if !a.pos.is_empty() {
+        die("usage: cbar watch [--next]");
+    }
     if mux::here_terminal().is_none() {
         die("run this inside a project's or an exchange's tmux or Rex pane");
     }
-    launch::run(&[switchboard_path(), "--watch".into(), "--here".into()], &[], false)
+    let mut argv = vec![switchboard_path(), "--watch".into(), "--here".into()];
+    if a.has("--next") {
+        argv.push("--next".into());
+    }
+    launch::run(&argv, &[], false)
 }
 
 fn cmd_board(home: &Home, args: Vec<String>) {

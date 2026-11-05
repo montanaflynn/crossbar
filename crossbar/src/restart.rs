@@ -98,7 +98,7 @@ pub fn keep_worktree_prompt(screen: &str) -> bool {
 }
 
 /// Whether SCREEN shows Claude Code's question on /exit while background
-/// work runs (a `cbar watch` Monitor, a background shell), with "Exit and
+/// work runs (a background `cbar watch --next`, a Monitor), with "Exit and
 /// stop tasks" chosen, so Enter exits (never "Move to background", which
 /// leaves the session running):
 ///

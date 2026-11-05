@@ -21,6 +21,8 @@
 //!   switchboard --watch --here    print a line as each report turns done, blocked or error,
 //!                                 stops or closes (reports: this session's agents; in an
 //!                                 exchange's session, also each of its projects' operators)
+//!   switchboard --watch --next --here   the same until the first event (and any others
+//!                                 within a second), then exit 0
 //!
 //! $CROSSBAR_TMUX_SOCKET names a tmux server other than the default (tmux -L).
 //!
@@ -1209,7 +1211,7 @@ fn live(mut board: Board) {
 // ---- main ------------------------------------------------------------------
 
 fn usage() -> ! {
-    util::die("usage: switchboard [--exchange NAME|--all|--here|--session NAME] [--once|--json|--watch]")
+    util::die("usage: switchboard [--exchange NAME|--all|--here|--session NAME] [--once|--json|--watch [--next]]")
 }
 
 pub fn main(args: Vec<String>) {
@@ -1220,7 +1222,7 @@ pub fn main(args: Vec<String>) {
         Some(args.get(i + 1).cloned().unwrap_or_else(|| usage()))
     };
     for a in &args {
-        if a.starts_with('-') && !["--exchange", "--all", "--here", "--session", "--once", "--json", "--watch", "-h", "--help"].contains(&a.as_str()) {
+        if a.starts_with('-') && !["--exchange", "--all", "--here", "--session", "--once", "--json", "--watch", "--next", "-h", "--help"].contains(&a.as_str()) {
             usage();
         }
     }
@@ -1276,9 +1278,12 @@ pub fn main(args: Vec<String>) {
     let exchanges: Vec<String> = home.exchanges().into_iter().map(|x| x.name).collect();
     let scope_id = scope.as_ref().map(|g| g.session_id.clone());
 
+    if has("--next") && !has("--watch") {
+        util::die("--next goes with --watch");
+    }
     if has("--watch") {
         let Some(g) = &scope else { util::die("--watch needs --here or --session NAME") };
-        crate::watch::watch(&home, &g.session_id, &g.label);
+        crate::watch::watch(&home, &g.session_id, &g.label, has("--next"));
         return;
     }
     if has("--json") {
@@ -1330,7 +1335,7 @@ pub fn main(args: Vec<String>) {
 }
 
 const HELP: &str = "
-usage: switchboard [--exchange NAME|--all|--here|--session NAME] [--once|--json|--watch]
+usage: switchboard [--exchange NAME|--all|--here|--session NAME] [--once|--json|--watch [--next]]
 
   switchboard                   the exchange switchboard: this exchange's sessions
   switchboard --exchange NAME   the switchboard of exchange NAME
@@ -1342,6 +1347,7 @@ usage: switchboard [--exchange NAME|--all|--here|--session NAME] [--once|--json|
   --json                        print the panes as JSON and exit
   --watch --here                a line as each report turns done, blocked or error,
                                 stops or closes
+  --watch --next --here         the same until the first event, then exit
 
 Keys:  j/k ↑/↓ select · J/K tab/shift-tab next/prev session · g/G first/last
        enter jump · 1-9 session N · a this exchange / all · 0 exchange switchboard · q quit

@@ -11,8 +11,13 @@ for a few looks, as the live ones did when the Rex server was slow (they
 timed out at cbar's 5s): 0.5.2 printed "<project> operator: stopped" for
 Claudes that were still there. Nothing may be printed for that. Then beta's
 Claude really quits (/exit): "beta operator: stopped" must come within a
-look or two, and the pane, once closed, "closed". Prints one line per check;
-exits 1 if any fails.
+look or two, and the pane, once closed, "closed".
+
+Before that, `cbar watch --next` in alpha's operator pane, run after run:
+the first exits at once on what stands; one with nothing new waits, silently,
+until an agent turns done; what happens while none runs (a done, a block, a
+Claude that quits, a closed tab) is printed by the next run, and nothing by
+the one after. Prints one line per check; exits 1 if any fails.
 """
 import argparse
 import importlib.machinery
@@ -64,6 +69,91 @@ def flaky_rex(side):
                 f'exec "{os.path.join(side.stub, "rex")}" "$@"\n')
     os.chmod(os.path.join(d, "rex"), 0o755)
     return d, flag
+
+
+def agent_pane(side, tab):
+    return next(((x["sid"], x["pane"]) for x in side.mux.panes() if x["session"] == side.session("alpha") and x["tab"] == tab), None)
+
+
+def next_cases(side):
+    """`cbar watch --next` in alpha's operator pane, run after run, over
+    alpha's agents (t-done done, t-ask blocked, t-boom error, t-busy
+    working, t-chat idle)."""
+    env = dict(side.env)
+    env.update(side.mux.pane_env(*side.panes_at["alpha"]))
+    runs = [0]
+
+    def start():
+        runs[0] += 1
+        log = os.path.join(side.box.root, f"next-{runs[0]}.out")
+        out, err = open(log, "w"), open(log + ".err", "w")
+        p = subprocess.Popen([os.path.join(side.bin, "cbar"), "watch", "--next"], env=env, cwd=side.box.home,
+                             stdout=out, stderr=err, stdin=subprocess.DEVNULL, start_new_session=True)
+        P.CLEANUP.add(f"watch --next {runs[0]}", lambda: p.poll() is None and os.killpg(p.pid, signal.SIGKILL))
+        return p, log
+
+    def lines(log):
+        return sorted(x for x in open(log).read().splitlines() if x.strip())
+
+    def exited(p, limit):
+        try:
+            return p.wait(limit) == 0
+        except subprocess.TimeoutExpired:
+            return False
+
+    def stop(p):
+        if p.poll() is None:
+            os.killpg(p.pid, signal.SIGTERM)
+            p.wait(10)
+
+    # 1: what stands at startup is news to the first watch: it prints it and exits at once
+    p, log = start()
+    t0 = time.time()
+    check("--next with news at startup exits 0", exited(p, 20), open(log).read().strip())
+    check("promptly (within 8s)", time.time() - t0 <= 8, f"{time.time() - t0:.1f}s")
+    want = ["t-ask: blocked (permission) — allow npm test?", "t-boom: error — tests failed", "t-done: done — finished the thing"]
+    check("it printed what stands", lines(log) == want, lines(log))
+    stop(p)
+
+    # 2: nothing new: it waits, silently, until t-chat is sent a line and turns done
+    p, log = start()
+    time.sleep(12)
+    check("idle, --next keeps waiting", p.poll() is None, f"exit {p.poll()}")
+    check("and prints nothing (what stands was printed)", lines(log) == [], lines(log))
+    chat = agent_pane(side, "t-chat")
+    side.mux.send_line(*chat, "ping")
+    check("an event exits it", exited(p, 20), open(log).read().strip())
+    check("it printed the event", lines(log) == ["t-chat: done — did: ping"], lines(log))
+    stop(p)
+
+    # 3: while no watch runs: t-busy turns done, t-chat blocked, t-boom's Claude quits, t-done closes
+    side.mux.send_line(*agent_pane(side, "t-busy"), "/state done | busy no more")
+    side.mux.send_line(*chat, "/state blocked permission | allow rm?")
+    boom = agent_pane(side, "t-boom")
+    side.mux.send_line(*boom, "/exit")
+    time.sleep(1)
+    side.mux.send_line(*boom, "")   # Enter: keep its worktree
+    gone = side.run(["cbar", "rm", "t-done"], pane="alpha")
+    check("t-done closed", gone[0] == 0, gone)
+    # (Rex keeps a quit Claude's last status on its pane: its process is what's gone)
+    boom_runs = lambda: P.sh(["pgrep", "-f", f"{side.stub}/claude -n t-boom"]).stdout.strip() != ""
+    states = lambda: {x["tab"]: x["state"] for x in side.mux.panes() if x["session"] == side.session("alpha")}
+    settled = wait_for(lambda: (lambda s: s.get("t-busy") == "done" and s.get("t-chat") == "blocked" and "t-done" not in s)(states()) and not boom_runs(), limit=30)
+    check("the changes took", settled, f"{states()}, t-boom's Claude {'runs' if boom_runs() else 'quit'}")
+    p, log = start()
+    check("the next --next exits on them", exited(p, 30), open(log).read().strip())
+    want = ["t-boom: stopped", "t-busy: done — busy no more", "t-chat: blocked (permission) — allow rm?", "t-done: closed — finished the thing"]
+    check("it printed each event between the runs", lines(log) == want, lines(log))
+    stop(p)
+
+    # 4: and the run after that has nothing to say: none twice
+    p, log = start()
+    time.sleep(12)
+    check("the run after waits", p.poll() is None, f"exit {p.poll()}")
+    check("and repeats nothing", lines(log) == [], lines(log))
+    stop(p)
+    errs = "".join(open(os.path.join(side.box.root, f"next-{i}.out.err")).read() for i in range(1, runs[0] + 1))
+    check("--next wrote no errors", errs.strip() == "", errs.strip())
 
 
 def cases(side):
@@ -149,6 +239,7 @@ def main():
         side = P.build_new(box, os.path.realpath(a.checkout), not a.no_build, a.rex)
         P.say(f"watch: setting up ({'rex' if a.rex else 'tmux'})")
         P.setup(side)
+        next_cases(side)
         cases(side)
         side.mux.stop()
         n, ps, _ = P.leftovers(side)

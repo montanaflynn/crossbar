@@ -69,7 +69,7 @@ def flaky_rex(side):
 def cases(side):
     E = P.EXCHANGE
     env = dict(side.env)
-    env.update(side.mux.pane_env(*side.panes_at["central"]))
+    env.update(side.mux.pane_env(*side.panes_at[E]))
     flag = None
     if side.rex:
         d, flag = flaky_rex(side)

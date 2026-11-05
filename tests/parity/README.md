@@ -33,10 +33,12 @@ Each side gets, under one `/tmp/cbpar-*` folder that is removed afterwards (`--k
   (`stub: blocked permission | allow npm test?`); typed lines make it work, then report done.
   claude-relay for both sides comes from the new checkout's build.
 
-The old side's `central` is built by hand (a supervisor stub and a main switchboard), as the live one
-was, since 0.4's cbar has no `cbar up`; the new side runs `cbar new --exchange main`. Then both run
-`cbar new alpha|beta DIR`, start the agents in `fixtures/briefs` with `cbar agent new`, wait for
-their states, and run the cases in `run` (`cases()`): boards (`--once`, `--json`, local and main),
+The old side's exchange, 0.4's `central` session, is built by hand (a supervisor stub and its
+switchboard), as the live one was, since 0.4's cbar has no `cbar up`; the new side runs
+`cbar new --exchange central`. Then both run `cbar new alpha|beta DIR`, start the agents in
+`fixtures/briefs` (old: `cbar agent new TASK`, new: `cbar new TASK`), wait for their states, and
+run the cases in `run` (`cases()`): boards (`--once`, `--json`, the exchange switchboard, the
+exchange's own session and a project switchboard),
 `ls`, `help`, the agent commands, errors and exit codes, `watch`, `rm`. The tmux server or Rex
 server, and anything else a run started, is stopped when it ends, however it ends.
 

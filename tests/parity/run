@@ -191,7 +191,7 @@ class Side:
             "PS1": "$ ",
         }
         self.mux = Rex(self) if rex else Tmux(self)
-        self.panes_at = {}   # project or "central": (session id, its operator's/supervisor's pane)
+        self.panes_at = {}   # project or EXCHANGE: (session id, its operator's/supervisor's pane)
 
     # names of things on this side
     def session(self, project=None):
@@ -448,8 +448,9 @@ SETUP = {}   # case name: (side: (code, out, err)), from setup steps compared as
 
 
 def setup(side):
-    """Central/the exchange with its supervisor and main board, projects alpha
-    and beta with operators and local boards, and the agents in AGENTS."""
+    """The exchange (0.4's central) with its supervisor and exchange
+    switchboard, projects alpha and beta with their operators and project
+    switchboards, and the agents in AGENTS."""
     s, box = side, side.box
     s.mux.start()
     term = "--rex" if s.rex else "--tmux"
@@ -487,7 +488,7 @@ def locate(side):
         for project in [None, *PROJECTS]:
             tab = "operator" if project else "supervisor"
             if p["session"] == side.session(project) and p["tab"] == tab and p["label"] != "switchboard":
-                side.panes_at.setdefault(project or "central", (p["sid"], p["pane"]))
+                side.panes_at.setdefault(project or EXCHANGE, (p["sid"], p["pane"]))
 
 
 def wait_states(side, want, limit=30):
@@ -508,7 +509,7 @@ def wait_states(side, want, limit=30):
 
 class Case:
     """OLD and NEW are argvs ('cbar …', 'switchboard …'); NEW defaults to OLD.
-    PANE runs them as if typed in that project's operator pane (or 'central':
+    PANE runs them as if typed in that project's operator pane (or EXCHANGE:
     the supervisor's). KIND says how output is compared: text, color (styles
     kept) or json. BEFORE/AFTER are hooks run on a side around the command."""
 
@@ -604,13 +605,13 @@ def cases():
         C("help", ["cbar", "help"]),
         C("version", ["cbar", "version"]),
         C("ls", ["cbar", "ls"]),
-        C("board-main-once", ["switchboard", "--once"]),
-        C("board-main-once-color", ["switchboard", "--once"], kind="color"),
-        C("board-main-json", ["switchboard", "--json"], kind="json"),
-        C("board-central-once", ["switchboard", "--once", "--session", "central"], ["switchboard", "--once", "--session", EXCHANGE]),
-        C("board-local-once", ["switchboard", "--once", *alpha], ["switchboard", "--once", "--session", f"{EXCHANGE}/alpha"]),
-        C("board-local-once-color", ["switchboard", "--once", *alpha], ["switchboard", "--once", "--session", f"{EXCHANGE}/alpha"], kind="color"),
-        C("board-local-json", ["switchboard", "--json", *alpha], ["switchboard", "--json", "--session", f"{EXCHANGE}/alpha"], kind="json"),
+        C("board-exchange-once", ["switchboard", "--once"]),
+        C("board-exchange-once-color", ["switchboard", "--once"], kind="color"),
+        C("board-exchange-json", ["switchboard", "--json"], kind="json"),
+        C("board-exchange-tabs-once", ["switchboard", "--once", "--session", "central"], ["switchboard", "--once", "--session", EXCHANGE]),
+        C("board-project-once", ["switchboard", "--once", *alpha], ["switchboard", "--once", "--session", f"{EXCHANGE}/alpha"]),
+        C("board-project-once-color", ["switchboard", "--once", *alpha], ["switchboard", "--once", "--session", f"{EXCHANGE}/alpha"], kind="color"),
+        C("board-project-json", ["switchboard", "--json", *alpha], ["switchboard", "--json", "--session", f"{EXCHANGE}/alpha"], kind="json"),
         # the 0.4 `cbar agent …` and `cbar board --here` forms (old) against their path forms (new)
         C("board-here-once", ["cbar", "board", "--here", "--once"], ["cbar", "board", ".", "--once"], pane="alpha"),
         C("board-here-json", ["cbar", "board", "--here", "--json"], ["cbar", "board", ".", "--json"], pane="alpha", kind="json"),

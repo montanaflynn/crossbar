@@ -108,14 +108,152 @@ The same: the agent in a non-git project starts without `-w` (the stub prints wh
  state: done | no repo here
 ```
 
-## board-central-once
+## board-exchange-json
 
-0.5.2: an exchange's supervisor starts in its `path`, else in the exchange's own folder, not `~`, where Claude Code asks to trust the folder every time (two-bugs.md).
+The same: the supervisor's and exchange switchboard's panes start in the exchange's folder, not `~`.
 
 ```diff
 --- old
 +++ new
-@@ -2,5 +2,5 @@
+@@ -9,5 +9,5 @@
+    {
+     "block_id": "<pane>",
+-    "cwd": "~",
++    "cwd": "~/.crossbar/exchanges/central",
+     "kind": "",
+     "label": "shell",
+@@ -22,5 +22,5 @@
+    {
+     "block_id": "<pane>",
+-    "cwd": "~",
++    "cwd": "~/.crossbar/exchanges/central",
+     "kind": "",
+     "label": "switchboard",
+```
+
+## board-exchange-json (rex)
+
+The Rust board's `--json` gives every group its `mux`, Rex ones too (0.4 left it out for Rex and readers assumed rex). Confirm: `--json` is documented output.
+
+```diff
+--- old
++++ new
+@@ -3,4 +3,5 @@
+   "group": {
+    "label": "central",
++   "mux": "rex",
+    "session_id": "<session>"
+   },
+@@ -8,5 +9,5 @@
+    {
+     "block_id": "<pane>",
+-    "cwd": "~",
++    "cwd": "~/.crossbar/exchanges/central",
+     "kind": "",
+     "label": "shell",
+@@ -21,5 +22,5 @@
+    {
+     "block_id": "<pane>",
+-    "cwd": "~",
++    "cwd": "~/.crossbar/exchanges/central",
+     "kind": "",
+     "label": "switchboard",
+@@ -37,4 +38,5 @@
+   "group": {
+    "label": "central/alpha",
++   "mux": "rex",
+    "session_id": "<session>"
+   },
+@@ -136,4 +138,5 @@
+   "group": {
+    "label": "central/beta",
++   "mux": "rex",
+    "session_id": "<session>"
+   },
+```
+
+## board-exchange-once
+
+The exchange switchboard shows one exchange and names it in its subtitle (exchanges.md). Since 0.5.2 the exchange's card shows its folder, not `~`: its supervisor starts there (two-bugs.md). 0.5.5: its header names it the exchange switchboard, `exchange central · projects & agents` (terms.md).
+
+```diff
+--- old
++++ new
+@@ -1,6 +1,6 @@
+-◇ switchboard agents & panes by session                                                        HH:MM
++◇ switchboard exchange central · projects & agents                                             HH:MM
+ ◆ 1 blocked  ✗ 1 error  ✓ 2 done  ⠋ 1 working  ○ 4 idle
+ 
+-╭─ central tmux ~ ───────────────────────────────────────────────────────────────────────────── 0 ─╮
++╭─ central tmux ~/.crossbar/exchanges/central ───────────────────────────────────────────── 0 ─╮
+ │ ○ supervisor       idle <age> │
+ ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
+## board-exchange-once (rex)
+
+The exchange switchboard shows one exchange and names it in its subtitle (exchanges.md). Since 0.5.2 the exchange's card shows its folder, not `~`: its supervisor starts there (two-bugs.md). 0.5.5: its header names it the exchange switchboard, `exchange central · projects & agents` (terms.md).
+
+```diff
+--- old
++++ new
+@@ -1,6 +1,6 @@
+-◇ switchboard agents & panes by session                                                        HH:MM
++◇ switchboard exchange central · projects & agents                                             HH:MM
+ ◆ 1 blocked  ✗ 1 error  ✓ 2 done  ⠋ 1 working  ○ 4 idle
+ 
+-╭─ central ~ ────────────────────────────────────────────────────────────────────────────────── 0 ─╮
++╭─ central ~/.crossbar/exchanges/central ────────────────────────────────────────────────── 0 ─╮
+ │ ○ supervisor       idle <age> │
+ ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
+## board-exchange-once-color
+
+The same as board-exchange-once, with colors.
+
+```diff
+--- old
++++ new
+@@ -1,6 +1,6 @@
+-[b fg=#be95ff]◇[/] [b fg=#be95ff]switchboard[/] [fg=#7b7c7e]agents[/] [fg=#7b7c7e]&[/] [fg=#7b7c7e]panes[/] [fg=#7b7c7e]by[/] [fg=#7b7c7e]session[/]                                                        [fg=#7b7c7e]HH:MM[/]
++[b fg=#be95ff]◇[/] [b fg=#be95ff]switchboard[/] [fg=#7b7c7e]exchange[/] [fg=#7b7c7e]central[/] [fg=#7b7c7e]·[/] [fg=#7b7c7e]projects[/] [fg=#7b7c7e]&[/] [fg=#7b7c7e]agents[/]                                             [fg=#7b7c7e]HH:MM[/]
+ [fg=#ee5396]◆[/] [fg=#ee5396]1[/] [fg=#ee5396]blocked[/]  [fg=#ff7eb6]✗[/] [fg=#ff7eb6]1[/] [fg=#ff7eb6]error[/]  [fg=#25be6a]✓[/] [fg=#25be6a]2[/] [fg=#25be6a]done[/]  [fg=#78a9ff]⠋[/] [fg=#78a9ff]1[/] [fg=#78a9ff]working[/]  [fg=#7b7c7e]○[/] [fg=#7b7c7e]4[/] [fg=#7b7c7e]idle[/]
+ 
+-[fg=#353535]╭─[/] [b fg=#f2f4f8]central[/] [fg=#525253]tmux[/] [fg=#7b7c7e]~[/] [fg=#353535]─────────────────────────────────────────────────────────────────────────────[/] [fg=#7b7c7e]0[/] [fg=#353535]─╮[/]
++[fg=#353535]╭─[/] [b fg=#f2f4f8]central[/] [fg=#525253]tmux[/] [fg=#7b7c7e]~/.crossbar/exchanges/central[/] [fg=#353535]─────────────────────────────────────────────[/] [fg=#7b7c7e]0[/] [fg=#353535]─╮[/]
+ [fg=#353535]│[/] [fg=#7b7c7e]○[/] [fg=#f2f4f8]supervisor[/]       [fg=#7b7c7e]idle[/] <age> [fg=#353535]│[/]
+ [fg=#353535]╰──────────────────────────────────────────────────────────────────────────────────────────────────╯[/]
+```
+
+## board-exchange-once-color (rex)
+
+The same as board-exchange-once, with colors.
+
+```diff
+--- old
++++ new
+@@ -1,6 +1,6 @@
+-[b fg=#be95ff]◇[/] [b fg=#be95ff]switchboard[/] [fg=#7b7c7e]agents[/] [fg=#7b7c7e]&[/] [fg=#7b7c7e]panes[/] [fg=#7b7c7e]by[/] [fg=#7b7c7e]session[/]                                                        [fg=#7b7c7e]HH:MM[/]
++[b fg=#be95ff]◇[/] [b fg=#be95ff]switchboard[/] [fg=#7b7c7e]exchange[/] [fg=#7b7c7e]central[/] [fg=#7b7c7e]·[/] [fg=#7b7c7e]projects[/] [fg=#7b7c7e]&[/] [fg=#7b7c7e]agents[/]                                             [fg=#7b7c7e]HH:MM[/]
+ [fg=#ee5396]◆[/] [fg=#ee5396]1[/] [fg=#ee5396]blocked[/]  [fg=#ff7eb6]✗[/] [fg=#ff7eb6]1[/] [fg=#ff7eb6]error[/]  [fg=#25be6a]✓[/] [fg=#25be6a]2[/] [fg=#25be6a]done[/]  [fg=#78a9ff]⠋[/] [fg=#78a9ff]1[/] [fg=#78a9ff]working[/]  [fg=#7b7c7e]○[/] [fg=#7b7c7e]4[/] [fg=#7b7c7e]idle[/]
+ 
+-[fg=#353535]╭─[/] [b fg=#f2f4f8]central[/] [fg=#7b7c7e]~[/] [fg=#353535]──────────────────────────────────────────────────────────────────────────────────[/] [fg=#7b7c7e]0[/] [fg=#353535]─╮[/]
++[fg=#353535]╭─[/] [b fg=#f2f4f8]central[/] [fg=#7b7c7e]~/.crossbar/exchanges/central[/] [fg=#353535]──────────────────────────────────────────────────[/] [fg=#7b7c7e]0[/] [fg=#353535]─╮[/]
+ [fg=#353535]│[/] [fg=#7b7c7e]○[/] [fg=#f2f4f8]supervisor[/]       [fg=#7b7c7e]idle[/] <age> [fg=#353535]│[/]
+ [fg=#353535]╰──────────────────────────────────────────────────────────────────────────────────────────────────╯[/]
+```
+
+## board-exchange-tabs-once
+
+0.5.2: an exchange's supervisor starts in its `path`, else in the exchange's own folder, not `~`, where Claude Code asks to trust the folder every time (two-bugs.md). 0.5.5: its header says it shows the exchange's own session, `exchange central` (terms.md).
+
+```diff
+--- old
++++ new
+@@ -1,6 +1,6 @@
+-◇ switchboard central · tabs & agents                                               ↖ central  HH:MM
++◇ switchboard exchange central · tabs & agents                                      ↖ central  HH:MM
  ○ 1 idle
  
 -╭─ supervisor ~ ─────────────────────────────────────────────────────────────────────────────── 1 ─╮
@@ -124,14 +262,16 @@ The same: the agent in a non-git project starts without `-w` (the stub prints wh
  ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
-## board-central-once (rex)
+## board-exchange-tabs-once (rex)
 
-0.5.2: an exchange's supervisor starts in its `path`, else in the exchange's own folder, not `~`, where Claude Code asks to trust the folder every time (two-bugs.md).
+0.5.2: an exchange's supervisor starts in its `path`, else in the exchange's own folder, not `~`, where Claude Code asks to trust the folder every time (two-bugs.md). 0.5.5: its header says it shows the exchange's own session, `exchange central` (terms.md).
 
 ```diff
 --- old
 +++ new
-@@ -2,5 +2,5 @@
+@@ -1,6 +1,6 @@
+-◇ switchboard central · tabs & agents                                               ↖ central  HH:MM
++◇ switchboard exchange central · tabs & agents                                      ↖ central  HH:MM
  ○ 1 idle
  
 -╭─ supervisor ~ ─────────────────────────────────────────────────────────────────────────────── 1 ─╮
@@ -142,7 +282,7 @@ The same: the agent in a non-git project starts without `-w` (the stub prints wh
 
 ## board-here-json (rex)
 
-The same as board-local-json, through `cbar board --here --json`.
+The same as board-project-json, through `cbar board --here --json`.
 
 ```diff
 --- old
@@ -407,7 +547,21 @@ The same as board-local-json, through `cbar board --here --json`.
     "window_id": "<window>"
 ```
 
-## board-local-json (rex)
+## board-here-once
+
+The same as board-project-once, through `cbar board .`.
+
+```diff
+--- old
++++ new
+@@ -1,3 +1,3 @@
+-◇ switchboard alpha · tabs & agents                                                 ↖ central  HH:MM
++◇ switchboard project alpha · tabs & agents                                         ↖ central  HH:MM
+ ◆ 1 blocked  ✗ 1 error  ✓ 1 done  ⠋ 1 working  ○ 1 idle
+ 
+```
+
+## board-project-json (rex)
 
 Scoped to one session, 0.4 passed Rex's raw window record through as each group (`layers`, `focused_block_id`); the Rust board gives the same slim group as everywhere (`session_id`, `label`, `mux`, `window_id`). The panes are the same. Confirm: `--json` is documented output.
 
@@ -674,140 +828,32 @@ Scoped to one session, 0.4 passed Rex's raw window record through as each group 
     "window_id": "<window>"
 ```
 
-## board-main-json
+## board-project-once
 
-The same: the supervisor's and main board's panes start in the exchange's folder, not `~`.
-
-```diff
---- old
-+++ new
-@@ -9,5 +9,5 @@
-    {
-     "block_id": "<pane>",
--    "cwd": "~",
-+    "cwd": "~/.crossbar/exchanges/central",
-     "kind": "",
-     "label": "shell",
-@@ -22,5 +22,5 @@
-    {
-     "block_id": "<pane>",
--    "cwd": "~",
-+    "cwd": "~/.crossbar/exchanges/central",
-     "kind": "",
-     "label": "switchboard",
-```
-
-## board-main-json (rex)
-
-The Rust board's `--json` gives every group its `mux`, Rex ones too (0.4 left it out for Rex and readers assumed rex). Confirm: `--json` is documented output.
+0.5.5: a project switchboard says so in its header, `project alpha` (terms.md).
 
 ```diff
 --- old
 +++ new
-@@ -3,4 +3,5 @@
-   "group": {
-    "label": "central",
-+   "mux": "rex",
-    "session_id": "<session>"
-   },
-@@ -8,5 +9,5 @@
-    {
-     "block_id": "<pane>",
--    "cwd": "~",
-+    "cwd": "~/.crossbar/exchanges/central",
-     "kind": "",
-     "label": "shell",
-@@ -21,5 +22,5 @@
-    {
-     "block_id": "<pane>",
--    "cwd": "~",
-+    "cwd": "~/.crossbar/exchanges/central",
-     "kind": "",
-     "label": "switchboard",
-@@ -37,4 +38,5 @@
-   "group": {
-    "label": "central/alpha",
-+   "mux": "rex",
-    "session_id": "<session>"
-   },
-@@ -136,4 +138,5 @@
-   "group": {
-    "label": "central/beta",
-+   "mux": "rex",
-    "session_id": "<session>"
-   },
-```
-
-## board-main-once
-
-The main board shows one exchange and names it in its subtitle (exchanges.md). Since 0.5.2 the exchange's card shows its folder, not `~`: its supervisor starts there (two-bugs.md).
-
-```diff
---- old
-+++ new
-@@ -1,6 +1,6 @@
--◇ switchboard agents & panes by session                                                        HH:MM
-+◇ switchboard central · agents & panes by session                                              HH:MM
- ◆ 1 blocked  ✗ 1 error  ✓ 2 done  ⠋ 1 working  ○ 4 idle
+@@ -1,3 +1,3 @@
+-◇ switchboard alpha · tabs & agents                                                 ↖ central  HH:MM
++◇ switchboard project alpha · tabs & agents                                         ↖ central  HH:MM
+ ◆ 1 blocked  ✗ 1 error  ✓ 1 done  ⠋ 1 working  ○ 2 idle
  
--╭─ central tmux ~ ───────────────────────────────────────────────────────────────────────────── 0 ─╮
-+╭─ central tmux ~/.crossbar/exchanges/central ───────────────────────────────────────────── 0 ─╮
- │ ○ supervisor       idle <age> │
- ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
-## board-main-once (rex)
+## board-project-once-color
 
-The main board shows one exchange and names it in its subtitle (exchanges.md). Since 0.5.2 the exchange's card shows its folder, not `~`: its supervisor starts there (two-bugs.md).
+The same as board-project-once, with colors.
 
 ```diff
 --- old
 +++ new
-@@ -1,6 +1,6 @@
--◇ switchboard agents & panes by session                                                        HH:MM
-+◇ switchboard central · agents & panes by session                                              HH:MM
- ◆ 1 blocked  ✗ 1 error  ✓ 2 done  ⠋ 1 working  ○ 4 idle
+@@ -1,3 +1,3 @@
+-[b fg=#be95ff]◇[/] [b fg=#be95ff]switchboard[/] [fg=#7b7c7e]alpha[/] [fg=#7b7c7e]·[/] [fg=#7b7c7e]tabs[/] [fg=#7b7c7e]&[/] [fg=#7b7c7e]agents[/]                                                 [fg=#525253]↖[/] [fg=#525253]central[/]  [fg=#7b7c7e]HH:MM[/]
++[b fg=#be95ff]◇[/] [b fg=#be95ff]switchboard[/] [fg=#7b7c7e]project[/] [fg=#7b7c7e]alpha[/] [fg=#7b7c7e]·[/] [fg=#7b7c7e]tabs[/] [fg=#7b7c7e]&[/] [fg=#7b7c7e]agents[/]                                         [fg=#525253]↖[/] [fg=#525253]central[/]  [fg=#7b7c7e]HH:MM[/]
+ [fg=#ee5396]◆[/] [fg=#ee5396]1[/] [fg=#ee5396]blocked[/]  [fg=#ff7eb6]✗[/] [fg=#ff7eb6]1[/] [fg=#ff7eb6]error[/]  [fg=#25be6a]✓[/] [fg=#25be6a]1[/] [fg=#25be6a]done[/]  [fg=#78a9ff]⠋[/] [fg=#78a9ff]1[/] [fg=#78a9ff]working[/]  [fg=#7b7c7e]○[/] [fg=#7b7c7e]2[/] [fg=#7b7c7e]idle[/]
  
--╭─ central ~ ────────────────────────────────────────────────────────────────────────────────── 0 ─╮
-+╭─ central ~/.crossbar/exchanges/central ────────────────────────────────────────────────── 0 ─╮
- │ ○ supervisor       idle <age> │
- ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-```
-
-## board-main-once-color
-
-The same as board-main-once, with colors.
-
-```diff
---- old
-+++ new
-@@ -1,6 +1,6 @@
--[b fg=#be95ff]◇[/] [b fg=#be95ff]switchboard[/] [fg=#7b7c7e]agents[/] [fg=#7b7c7e]&[/] [fg=#7b7c7e]panes[/] [fg=#7b7c7e]by[/] [fg=#7b7c7e]session[/]                                                        [fg=#7b7c7e]HH:MM[/]
-+[b fg=#be95ff]◇[/] [b fg=#be95ff]switchboard[/] [fg=#7b7c7e]central[/] [fg=#7b7c7e]·[/] [fg=#7b7c7e]agents[/] [fg=#7b7c7e]&[/] [fg=#7b7c7e]panes[/] [fg=#7b7c7e]by[/] [fg=#7b7c7e]session[/]                                              [fg=#7b7c7e]HH:MM[/]
- [fg=#ee5396]◆[/] [fg=#ee5396]1[/] [fg=#ee5396]blocked[/]  [fg=#ff7eb6]✗[/] [fg=#ff7eb6]1[/] [fg=#ff7eb6]error[/]  [fg=#25be6a]✓[/] [fg=#25be6a]2[/] [fg=#25be6a]done[/]  [fg=#78a9ff]⠋[/] [fg=#78a9ff]1[/] [fg=#78a9ff]working[/]  [fg=#7b7c7e]○[/] [fg=#7b7c7e]4[/] [fg=#7b7c7e]idle[/]
- 
--[fg=#353535]╭─[/] [b fg=#f2f4f8]central[/] [fg=#525253]tmux[/] [fg=#7b7c7e]~[/] [fg=#353535]─────────────────────────────────────────────────────────────────────────────[/] [fg=#7b7c7e]0[/] [fg=#353535]─╮[/]
-+[fg=#353535]╭─[/] [b fg=#f2f4f8]central[/] [fg=#525253]tmux[/] [fg=#7b7c7e]~/.crossbar/exchanges/central[/] [fg=#353535]─────────────────────────────────────────────[/] [fg=#7b7c7e]0[/] [fg=#353535]─╮[/]
- [fg=#353535]│[/] [fg=#7b7c7e]○[/] [fg=#f2f4f8]supervisor[/]       [fg=#7b7c7e]idle[/] <age> [fg=#353535]│[/]
- [fg=#353535]╰──────────────────────────────────────────────────────────────────────────────────────────────────╯[/]
-```
-
-## board-main-once-color (rex)
-
-The same as board-main-once, with colors.
-
-```diff
---- old
-+++ new
-@@ -1,6 +1,6 @@
--[b fg=#be95ff]◇[/] [b fg=#be95ff]switchboard[/] [fg=#7b7c7e]agents[/] [fg=#7b7c7e]&[/] [fg=#7b7c7e]panes[/] [fg=#7b7c7e]by[/] [fg=#7b7c7e]session[/]                                                        [fg=#7b7c7e]HH:MM[/]
-+[b fg=#be95ff]◇[/] [b fg=#be95ff]switchboard[/] [fg=#7b7c7e]central[/] [fg=#7b7c7e]·[/] [fg=#7b7c7e]agents[/] [fg=#7b7c7e]&[/] [fg=#7b7c7e]panes[/] [fg=#7b7c7e]by[/] [fg=#7b7c7e]session[/]                                              [fg=#7b7c7e]HH:MM[/]
- [fg=#ee5396]◆[/] [fg=#ee5396]1[/] [fg=#ee5396]blocked[/]  [fg=#ff7eb6]✗[/] [fg=#ff7eb6]1[/] [fg=#ff7eb6]error[/]  [fg=#25be6a]✓[/] [fg=#25be6a]2[/] [fg=#25be6a]done[/]  [fg=#78a9ff]⠋[/] [fg=#78a9ff]1[/] [fg=#78a9ff]working[/]  [fg=#7b7c7e]○[/] [fg=#7b7c7e]4[/] [fg=#7b7c7e]idle[/]
- 
--[fg=#353535]╭─[/] [b fg=#f2f4f8]central[/] [fg=#7b7c7e]~[/] [fg=#353535]──────────────────────────────────────────────────────────────────────────────────[/] [fg=#7b7c7e]0[/] [fg=#353535]─╮[/]
-+[fg=#353535]╭─[/] [b fg=#f2f4f8]central[/] [fg=#7b7c7e]~/.crossbar/exchanges/central[/] [fg=#353535]──────────────────────────────────────────────────[/] [fg=#7b7c7e]0[/] [fg=#353535]─╮[/]
- [fg=#353535]│[/] [fg=#7b7c7e]○[/] [fg=#f2f4f8]supervisor[/]       [fg=#7b7c7e]idle[/] <age> [fg=#353535]│[/]
- [fg=#353535]╰──────────────────────────────────────────────────────────────────────────────────────────────────╯[/]
 ```
 
 ## err-agent-new-exists
@@ -1075,29 +1121,57 @@ The same tree as ls, after t-done and t-boom were closed and beta removed.
 
 ## new-project-alpha
 
-The hint names the project by its path (`/central/alpha`).
+The hint names the project by its path (`/central/alpha`). 0.5.5: it says the session gets a project switchboard (terms.md).
 
 ```diff
 --- old
 +++ new
 @@ -1,3 +1,3 @@
- created session 'central/alpha' in ~/repo-a with an operator and a switchboard (tmux)
+-created session 'central/alpha' in ~/repo-a with an operator and a switchboard (tmux)
 -attach: cbar open alpha
++created session 'central/alpha' in ~/repo-a with an operator and a project switchboard (tmux)
 +attach: cbar open /central/alpha
+ --- exit 0
+```
+
+## new-project-alpha (rex)
+
+0.5.5: it says the session gets a project switchboard (terms.md). Rex prints no attach hint.
+
+```diff
+--- old
++++ new
+@@ -1,2 +1,2 @@
+-created session 'central/alpha' in ~/repo-a with an operator and a switchboard
++created session 'central/alpha' in ~/repo-a with an operator and a project switchboard
  --- exit 0
 ```
 
 ## new-project-beta
 
-The hint names the project by its path (`/central/beta`).
+The hint names the project by its path (`/central/beta`). 0.5.5: it says the session gets a project switchboard (terms.md).
 
 ```diff
 --- old
 +++ new
 @@ -1,3 +1,3 @@
- created session 'central/beta' in ~/repo-b with an operator and a switchboard (tmux)
+-created session 'central/beta' in ~/repo-b with an operator and a switchboard (tmux)
 -attach: cbar open beta
++created session 'central/beta' in ~/repo-b with an operator and a project switchboard (tmux)
 +attach: cbar open /central/beta
+ --- exit 0
+```
+
+## new-project-beta (rex)
+
+0.5.5: it says the session gets a project switchboard (terms.md). Rex prints no attach hint.
+
+```diff
+--- old
++++ new
+@@ -1,2 +1,2 @@
+-created session 'central/beta' in ~/repo-b with an operator and a switchboard
++created session 'central/beta' in ~/repo-b with an operator and a project switchboard
  --- exit 0
 ```
 

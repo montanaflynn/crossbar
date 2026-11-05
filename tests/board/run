@@ -5,13 +5,13 @@ sandbox, tests/parity/run).
 
   tests/board/run [--rex] [--keep] [--no-build] [-v] CHECKOUT
 
-The exchange has its supervisor and main board, and projects alpha and beta
-their operators and local boards. Then:
+The exchange has its supervisor and exchange switchboard, and projects alpha
+and beta their operators and project switchboards. Then:
 
 - every board is replaced the way the operator did it live (close the
   board's pane, split `cbar run --pane board` off the supervisor's or
   operator's pane): all six run;
-- the main board is sent a mouse report and a focus report that arrive as a
+- the exchange switchboard is sent a mouse report and a focus report that arrive as a
   lone ESC and then the rest, as the Rex app's can. 0.5.3 quit on that Esc
   and its pane dropped to a shell, silently: it must keep running, and not
   jump anywhere;
@@ -113,7 +113,7 @@ def cases(side):
     log = os.path.join(side.cb, "logs", "switchboard.log")
     logged = lambda: open(log).read() if os.path.exists(log) else ""
     sessions = [E, f"{E}/alpha", f"{E}/beta"]
-    leads = {E: side.panes_at["central"], f"{E}/alpha": side.panes_at["alpha"], f"{E}/beta": side.panes_at["beta"]}
+    leads = {E: side.panes_at[E], f"{E}/alpha": side.panes_at["alpha"], f"{E}/beta": side.panes_at["beta"]}
     board_argv = [os.path.join(side.bin, "cbar"), "run", "--pane", "board"]
 
     def running(session):
@@ -133,29 +133,29 @@ def cases(side):
     time.sleep(3)
     check("and keeps running", all(running(s) for s in sessions))
 
-    sid, main = S.board(E)
+    sid, ex_board = S.board(E)
     # a mouse report and a focus report that arrive as a lone ESC, then the
     # rest. Read as keys, its digits jump to sessions: a jump leaves ✓, ✗ or ?
     # in the footer for 3s
     footers = []
     for tail in ("[<35;1;3M", "[I", "[<35;12;2M"):
-        S.write(sid, main, "\x1b")
+        S.write(sid, ex_board, "\x1b")
         time.sleep(0.1)
-        S.write(sid, main, tail)
+        S.write(sid, ex_board, tail)
         time.sleep(0.6)
-        lines = [l for l in S.screen(sid, main).splitlines() if l.strip()]
+        lines = [l for l in S.screen(sid, ex_board).splitlines() if l.strip()]
         footers.append(lines[-1].strip() if lines else "")
     time.sleep(2)
-    check("a split mouse or focus report doesn't quit the main board", S.program(sid, main) == "switchboard",
-          S.screen(sid, main)[-300:].strip())
+    check("a split mouse or focus report doesn't quit the exchange switchboard", S.program(sid, ex_board) == "switchboard",
+          S.screen(sid, ex_board)[-300:].strip())
     check("nor jump to a session", not any(f[:1] in ("✓", "✗", "?") for f in footers), footers)
 
     # q quits it, and it says why
     mark = len(logged())
-    S.write(sid, main, "q")
-    gone = wait_for(lambda: S.program(sid, main) in SHELLS, limit=10)
-    check("q quits it to a shell", gone, S.program(sid, main))
-    screen = S.screen(sid, main)
+    S.write(sid, ex_board, "q")
+    gone = wait_for(lambda: S.program(sid, ex_board) in SHELLS, limit=10)
+    check("q quits it to a shell", gone, S.program(sid, ex_board))
+    screen = S.screen(sid, ex_board)
     check("its pane says why", "switchboard: exited: q pressed" in screen, screen[-300:].strip())
     check("so does the log", "exited: q pressed" in logged()[mark:] and f"switchboard --exchange {E}" in logged()[mark:],
           logged()[mark:].strip())
@@ -163,8 +163,8 @@ def cases(side):
 
     # cbar up starts it again in its pane, and leaves the rest alone
     others = {s: S.board(s) for s in sessions if s != E}
-    code, out, err = side.run(["cbar", "up"], pane="central")
-    check("cbar up says it started the main board again", f"{E}: started its switchboard again" in out, out + err)
+    code, out, err = side.run(["cbar", "up"], pane=E)
+    check("cbar up says it started the exchange switchboard again", f"{E}: started its switchboard again" in out, out + err)
     check("it's running", wait_for(lambda: running(E), limit=15), S.boards().get(E))
     check("one board in the exchange's session", len(S.boards().get(E, [])) == 1, S.boards().get(E))
     check("in the supervisor's tab", all(t == "supervisor" for _, _, t in S.boards().get(E, [])), S.boards().get(E))
@@ -175,7 +175,7 @@ def cases(side):
     asid, apane = S.board(f"{E}/alpha")
     S.close(asid, apane)
     wait_for(lambda: not S.boards().get(f"{E}/alpha"), limit=10)
-    code, out, err = side.run(["cbar", "up"], pane="central")
+    code, out, err = side.run(["cbar", "up"], pane=E)
     check("cbar up adds alpha's board", f"{E}/alpha: started its switchboard" in out, out + err)
     check("which runs", wait_for(lambda: running(f"{E}/alpha"), limit=15), S.boards().get(f"{E}/alpha"))
     check("in alpha's operator tab", [t for _, _, t in S.boards().get(f"{E}/alpha", [])] == ["operator"],
@@ -184,7 +184,7 @@ def cases(side):
     # and again: nothing to do
     time.sleep(2)
     snap = S.boards()
-    code, out, err = side.run(["cbar", "up"], pane="central")
+    code, out, err = side.run(["cbar", "up"], pane=E)
     check("cbar up again: all running", all(f"{s}: running" in out for s in sessions) and "started" not in out, out + err)
     check("and no board changed", S.boards() == snap, f"{snap} → {S.boards()}")
 
@@ -209,7 +209,7 @@ def cases(side):
     check("a killed board's pane says so", "switchboard: killed by SIGKILL" in screen, screen[-300:].strip())
     check("so does the log", "killed by SIGKILL" in logged()[mark:], logged()[mark:].strip())
     # in tmux, a killed board leaves its pane's mark on the shell: up still sees it's gone
-    code, out, err = side.run(["cbar", "up"], pane="central")
+    code, out, err = side.run(["cbar", "up"], pane=E)
     check("cbar up starts the killed board again", f"{E}/beta: started its switchboard again" in out, out + err)
     check("which runs", wait_for(lambda: running(f"{E}/beta"), limit=15), S.boards().get(f"{E}/beta"))
 

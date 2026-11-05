@@ -1,0 +1,27 @@
+# On a push to main and on pull requests: clippy, and cargo test with the
+# sandbox tests on a private tmux server (crossbar/tests/sandbox). The Rex
+# tests are opt-in (they need Rex) and don't run here.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q tmux
+      - if: runner.os == 'macOS'
+        run: brew install tmux
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+        env:
+          CBAR_TEST_REQUIRE_TMUX: "1"

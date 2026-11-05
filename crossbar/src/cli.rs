@@ -1,7 +1,8 @@
-//! cbar: crossbar, a team of Claude Code agents in Rex or tmux. Each exchange
-//! has a supervisor (in the session named after it) and projects; each
-//! project has a session `<exchange>/<project>` with its operator in the
-//! first tab, and agents in other tabs.
+//! cbar: crossbar, a team of Claude Code agents in Rex or tmux. An exchange
+//! is a group of projects: it has a supervisor (in the session named after
+//! it) and an exchange switchboard. A project is a folder or repo in an
+//! exchange: its session `<exchange>/<project>` has its operator in the first
+//! tab, a project switchboard, and agents in other tabs.
 
 use std::fs;
 use std::io::{BufRead, IsTerminal, Write};
@@ -27,18 +28,18 @@ A PATH is exchange/project/agent, relative to where you are: inside a project,
 exchange), `stats` is its project. `/central/stats` is absolute, `..` goes up.
 
   new PROJECT [DIR] [--tmux|--rex]   register a project and start its session with an operator
-                                     and a local switchboard (DIR: this folder; terminal: the
+                                     and a project switchboard (DIR: this folder; terminal: the
                                      one you're in, else Rex if it's running)
   new PROJECT/AGENT [BRIEF]          start Claude in a new tab of that project on its brief,
       [--no-worktree]                <project>/briefs/AGENT.md (BRIEF is copied there); in its
                                      own git worktree when the project is a git repo
   new --agent AGENT [BRIEF]          the same in the exchange's own session (the supervisor's)
-  new --exchange NAME [DIR]          create an exchange and start its supervisor and main board
+  new --exchange NAME [DIR]          create an exchange and start its supervisor and switchboard
       [--tmux|--rex]                 in DIR (`path` in its exchange.toml; default: its own
                                      folder under ~/.crossbar/exchanges/), where its agents start
-  up [EXCHANGE] [--tmux|--rex]       start the exchange's supervisor and main switchboard and
-                                     every project's session, operator and local switchboard
-                                     that isn't running (a board pane with only a shell counts);
+  up [EXCHANGE] [--tmux|--rex]       start the exchange's supervisor and switchboard and every
+                                     project's session, operator and project switchboard
+                                     that isn't running (a switchboard pane with only a shell counts);
                                      leaves whatever runs alone
   ls [PATH]                          exchanges > projects > agents, with their status
   open [-n] PATH                     switch to that session (an agent: its tab)
@@ -57,7 +58,9 @@ exchange), `stats` is its project. `/central/stats` is absolute, `..` goes up.
   watch                              a line each time one of your reports turns done, blocked or
                                      error, stops or closes (operators: their agents; supervisors:
                                      their agents and their projects' operators)
-  board [EXCHANGE|PROJECT] [--all]   the switchboard (--once prints once, --json prints JSON)
+  board [EXCHANGE|PROJECT] [--all]   that exchange's or project's switchboard (default: this
+                                     exchange's; --all: every exchange; --once prints once, --json
+                                     prints JSON)
   update                             install the latest crossbar from GitHub
   version                            the installed version
   run supervisor|operator|board|agent  what cbar starts in the panes it makes
@@ -269,14 +272,14 @@ fn exchange_dir(home: &Home, e: &str) -> Result<String, String> {
 }
 
 /// Session E in DIR: tab supervisor running `cbar run supervisor`, and the
-/// main switchboard at 30% to its right.
+/// exchange switchboard at 30% to its right.
 fn start_exchange(e: &str, dir: &str, term: Term) -> Result<(), String> {
     let root = format!("/{e}");
     let made = mux::new_session(term, e, dir, SUPERVISOR, &pane_argv(&["supervisor", &root]))?;
     if let Err(err) = mux::split(term, e, &made.pane, dir, 30, false, "switchboard", &pane_argv(&["board", &root])) {
         util::warn(format!("could not add the switchboard pane: {err}"));
     }
-    println!("created session '{e}' in {} with a supervisor and the main switchboard{}", short(dir), if term == Term::Tmux { " (tmux)" } else { "" });
+    println!("created session '{e}' in {} with a supervisor and an exchange switchboard{}", short(dir), if term == Term::Tmux { " (tmux)" } else { "" });
     Ok(())
 }
 
@@ -307,7 +310,7 @@ fn new_project(home: &Home, e: &str, p: &str, dir: Option<&str>, term: Option<Te
     }
 }
 
-/// Session E/P: tab operator running `cbar run operator`, and its local
+/// Session E/P: tab operator running `cbar run operator`, and the project
 /// switchboard at 30% to its right.
 fn start_project(session: &str, dir: &str, term: Term) -> Result<(), String> {
     let root = format!("/{session}");
@@ -316,11 +319,11 @@ fn start_project(session: &str, dir: &str, term: Term) -> Result<(), String> {
         util::warn(format!("could not add the switchboard pane: {err}"));
     }
     if term == Term::Tmux {
-        println!("created session '{session}' in {} with an operator and a switchboard (tmux)", short(dir));
+        println!("created session '{session}' in {} with an operator and a project switchboard (tmux)", short(dir));
         let how = if util::env("TMUX").is_some() { "switch to it" } else { "attach" };
         println!("{how}: cbar open /{session}");
     } else {
-        println!("created session '{session}' in {} with an operator and a switchboard", short(dir));
+        println!("created session '{session}' in {} with an operator and a project switchboard", short(dir));
     }
     Ok(())
 }
@@ -1369,8 +1372,8 @@ mod tests {
         }
     }
 
-    /// `cbar up` and a session's switchboard: the live case was a main board
-    /// whose pane had dropped to zsh, which up reported as running.
+    /// `cbar up` and a session's switchboard: the live case was an exchange
+    /// switchboard whose pane had dropped to zsh, which up reported as running.
     #[test]
     fn up_restarts_a_missing_or_dropped_board() {
         let sup = flat("supervisor", "shell", "claude", "idle", "b1");

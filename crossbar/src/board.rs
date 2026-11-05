@@ -1,17 +1,20 @@
 //! switchboard: a live overview of the sessions of an exchange (or of every
-//! exchange), and a way to jump to any pane.
+//! exchange), or of one session's tabs, and a way to jump to any pane. An
+//! exchange's switchboard runs next to its supervisor, a project's next to
+//! its operator; agents have none.
 //!
 //! Each session is a card; each pane a row with its tab name, program status
 //! (idle / working / done / blocked / error) and how long it has been in that
 //! state. Rex reports status via OSC 7501; in tmux it comes from claude-relay
 //! or `claude agents` (see status.rs).
 //!
-//!   switchboard                   the main board: this exchange's sessions
+//!   switchboard                   the exchange switchboard: this exchange's sessions
 //!                                 (the one this pane's session belongs to,
 //!                                 else the default exchange)
-//!   switchboard --exchange NAME   the main board of exchange NAME
+//!   switchboard --exchange NAME   the switchboard of exchange NAME
 //!   switchboard --all             every session, by exchange
-//!   switchboard --session NAME    live view of one session: a card per tab
+//!   switchboard --session NAME    live view of one session: a card per tab (a
+//!                                 project's session: its project switchboard)
 //!   switchboard --here            same, for this pane's session ($TMUX_PANE or $REX_SESSION)
 //!   switchboard --once            print once and exit (combines with the above)
 //!   switchboard --json            print the panes as JSON and exit (combines with the above)
@@ -24,10 +27,10 @@
 //! Keys:  j/k ↑/↓ select · J/K tab/shift-tab next/prev session · g/G first/last
 //!        enter jump to pane · 1-9 jump to session N · a this exchange / all
 //!        exchanges · q quit (scoped to one session, "session" above means
-//!        tab; 0/~ jumps to the exchange's main switchboard)
+//!        tab; 0/~ jumps to the exchange switchboard)
 //! Mouse: click a row to jump to that pane, click a card header to jump to that
 //!        session, wheel moves the selection; scoped, click "↖ <exchange>" in
-//!        the header to jump to the main switchboard.
+//!        the header to jump to the exchange switchboard.
 //!
 //! Jumping asks the Rex app (a client) to show the session and tab with the
 //! client action session.select, then focuses the pane. In tmux it selects
@@ -115,13 +118,27 @@ fn width(spans: &[Span]) -> usize {
     spans.iter().map(|s| s.content.chars().count()).sum()
 }
 
-/// Which sessions a main board shows, and how it names them.
+/// Which sessions a switchboard shows, and how it names them: an
+/// exchange's, every exchange's, or one session's tabs (a project
+/// switchboard shows its project's session).
 #[derive(Clone, Debug, PartialEq)]
 pub enum View {
     Exchange(String),
     All,
-    /// One session's tabs: its id, and its label as shown.
-    Scoped(String, String),
+    /// One session's tabs: its id, its label as shown, and whose session it
+    /// is.
+    Scoped(String, String, Whose),
+}
+
+/// Whose session a scoped switchboard shows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Whose {
+    /// A project's: this is its project switchboard.
+    Project,
+    /// An exchange's own (the supervisor's).
+    Exchange,
+    /// A session crossbar didn't make.
+    Other,
 }
 
 /// A card's title: a project's session without its exchange's prefix.
@@ -157,7 +174,8 @@ pub fn pick(data: &Snapshot, view: &View, exchanges: &[String]) -> Snapshot {
 
 type Lines = (Vec<Line<'static>>, Vec<Option<Target>>);
 
-/// The session a main board numbers 0: its exchange's own (the supervisor's).
+/// The session an exchange switchboard numbers 0: its exchange's own (the
+/// supervisor's).
 fn zero_label<'a>(view: &'a View, exchange: &'a str) -> Option<&'a str> {
     match view {
         View::Exchange(e) => Some(e),
@@ -166,7 +184,7 @@ fn zero_label<'a>(view: &'a View, exchange: &'a str) -> Option<&'a str> {
     }
 }
 
-/// (number, card) in card order: on a main board the exchange's session
+/// (number, card) in card order: on an exchange switchboard the exchange's session
 /// comes first as 0 and the rest count from 1.
 pub fn numbered<'a>(data: &'a Snapshot, view: &View, exchange: &str) -> Vec<(usize, &'a (Group, Vec<Pane>))> {
     let zero = zero_label(view, exchange);
@@ -310,7 +328,8 @@ fn card(number: usize, group: &Group, name: &str, panes: &[Pane], cols: usize, t
     (lines, targets)
 }
 
-/// Columns [start, end) of the header's main link, in line coordinates.
+/// Columns [start, end) of the header's link to the exchange switchboard, in
+/// line coordinates.
 fn link_span(cols: usize, link: &str) -> (usize, usize) {
     let cols = cols.clamp(36, 100);
     let end = cols - util::clock().chars().count() - 2;
@@ -322,8 +341,8 @@ pub struct Frame {
     pub targets: Vec<Option<Target>>,
 }
 
-/// The whole board for DATA (already picked for VIEW). LINK names the main
-/// board a scoped board links to; LINK_HOT colors it.
+/// The whole board for DATA (already picked for VIEW). LINK names the exchange
+/// whose switchboard a scoped board links to; LINK_HOT colors it.
 pub fn render(data: &Snapshot, view: &View, cols: usize, tick: usize, selected: Option<&str>, link: &str, link_hot: bool) -> Frame {
     let cols = cols.clamp(36, 100);
     let scoped = matches!(view, View::Scoped(..));
@@ -357,10 +376,13 @@ pub fn render(data: &Snapshot, view: &View, cols: usize, tick: usize, selected: 
         pills.push(s(format!("▪ {others} other {}", if others == 1 { "pane" } else { "panes" }), MUTED));
     }
     let clock = util::clock();
+    // say which switchboard this is: an exchange's or a project's
     let mut subtitle = match view {
-        View::Scoped(_, label) => format!("{label} · tabs & agents"),
-        View::Exchange(e) => format!("{e} · agents & panes by session"),
-        View::All => "all exchanges · agents & panes by session".into(),
+        View::Scoped(_, label, Whose::Project) => format!("project {label} · tabs & agents"),
+        View::Scoped(_, label, Whose::Exchange) => format!("exchange {label} · tabs & agents"),
+        View::Scoped(_, label, Whose::Other) => format!("{label} · tabs & agents"),
+        View::Exchange(e) => format!("exchange {e} · projects & agents"),
+        View::All => "all exchanges · projects & agents".into(),
     };
     let brand = || Span::styled("◇ switchboard", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD));
     let mut head;
@@ -480,12 +502,12 @@ pub fn ansi(lines: &[Line]) -> String {
     out
 }
 
-// ---- finding the main board ------------------------------------------------------
+// ---- finding the exchange switchboard ---------------------------------------------
 
-/// The main switchboard's pane: (session id, session label, window id, pane id).
-pub type MainHit = (String, String, String, String);
+/// An exchange switchboard's pane: (session id, session label, window id, pane id).
+pub type ExchangeBoard = (String, String, String, String);
 
-/// How well a main board showing BOARD_EX (from its argv: "" for the
+/// How well an exchange switchboard showing BOARD_EX (from its argv: "" for the
 /// default, "*" for all) in session LABEL fits exchange EX: lower is better.
 fn fit_score(board_ex: &str, label: &str, ex: &str, default: &str) -> Option<u8> {
     let shown = if board_ex.is_empty() {
@@ -506,10 +528,17 @@ fn fit_score(board_ex: &str, label: &str, ex: &str, default: &str) -> Option<u8>
     }
 }
 
-fn tmux_find_main(look: &Looker, ex: &str, default: &str) -> Option<(u8, MainHit)> {
+/// The @cbar_role a board sets on its tmux pane: "main" for an exchange
+/// switchboard (the pane others jump to), "local" for one session's. The
+/// values are older than these names and stay, so that boards of either
+/// version find each other.
+const ROLE_EXCHANGE: &str = "main";
+const ROLE_SESSION: &str = "local";
+
+fn tmux_find_exchange_board(look: &Looker, ex: &str, default: &str) -> Option<(u8, ExchangeBoard)> {
     status::tmux_rows()
         .into_iter()
-        .filter(|r| r["@cbar_role"] == "main" && !look.hide.contains(&r["pane_id"]))
+        .filter(|r| r["@cbar_role"] == ROLE_EXCHANGE && !look.hide.contains(&r["pane_id"]))
         .filter_map(|r| {
             let score = fit_score(&r["@cbar_exchange"], &r["session_name"], ex, default)?;
             Some((score, (r["session_id"].clone(), r["session_name"].clone(), r["window_id"].clone(), r["pane_id"].clone())))
@@ -517,9 +546,9 @@ fn tmux_find_main(look: &Looker, ex: &str, default: &str) -> Option<(u8, MainHit
         .min_by_key(|(s, _)| *s)
 }
 
-/// Whether Rex block BLOCK of session SID runs a main switchboard; the
+/// Whether Rex block BLOCK of session SID runs an exchange switchboard; the
 /// exchange it shows from its argv ("" default, "*" all).
-fn rex_main_board(look: &Looker, sid: &str, block: &serde_json::Value) -> Option<String> {
+fn rex_exchange_board(look: &Looker, sid: &str, block: &serde_json::Value) -> Option<String> {
     if block["label"] != "switchboard" || block["placement"].as_str().unwrap_or("placed") != "placed" {
         return None;
     }
@@ -532,14 +561,14 @@ fn rex_main_board(look: &Looker, sid: &str, block: &serde_json::Value) -> Option
     status::board_kind(&status::argv_of(pid))?
 }
 
-fn rex_find_main(look: &Looker, ex: &str, default: &str) -> Option<(u8, MainHit)> {
+fn rex_find_exchange_board(look: &Looker, ex: &str, default: &str) -> Option<(u8, ExchangeBoard)> {
     let mut sessions = mux::rex_sessions();
     sessions.sort_by_key(|(_, l)| l != ex);
-    let mut best: Option<(u8, MainHit)> = None;
+    let mut best: Option<(u8, ExchangeBoard)> = None;
     for (sid, label) in sessions {
         let blocks = rex_json(&["block", "ls", "-s", &sid, "--json"]).and_then(|v| v["blocks"].as_array().cloned()).unwrap_or_default();
         for b in &blocks {
-            if let Some(shown) = rex_main_board(look, &sid, b) {
+            if let Some(shown) = rex_exchange_board(look, &sid, b) {
                 if let Some(score) = fit_score(&shown, &label, ex, default) {
                     let hit = (sid.clone(), label.clone(), b["window_id"].as_str().unwrap_or("").to_string(), b["block_id"].as_str().unwrap_or("").to_string());
                     if score == 0 {
@@ -555,27 +584,27 @@ fn rex_find_main(look: &Looker, ex: &str, default: &str) -> Option<(u8, MainHit)
     best
 }
 
-/// The main switchboard for exchange EX, the terminal this pane runs in first.
-pub fn find_main(look: &Looker, ex: &str, default: &str) -> Option<MainHit> {
+/// The switchboard of exchange EX, the terminal this pane runs in first.
+pub fn find_exchange_board(look: &Looker, ex: &str, default: &str) -> Option<ExchangeBoard> {
     let in_tmux = util::env("TMUX_PANE").is_some();
-    let a = if in_tmux { tmux_find_main(look, ex, default) } else { rex_find_main(look, ex, default) };
+    let a = if in_tmux { tmux_find_exchange_board(look, ex, default) } else { rex_find_exchange_board(look, ex, default) };
     if let Some((0, hit)) = a {
         return Some(hit);
     }
-    let b = if in_tmux { rex_find_main(look, ex, default) } else { tmux_find_main(look, ex, default) };
+    let b = if in_tmux { rex_find_exchange_board(look, ex, default) } else { tmux_find_exchange_board(look, ex, default) };
     [a, b].into_iter().flatten().min_by_key(|(s, _)| *s).map(|(_, h)| h)
 }
 
-/// The window PANE is in if it still runs a main switchboard, else None.
-fn main_window(look: &Looker, sid: &str, pane: &str) -> Option<String> {
+/// The window PANE is in if it still runs an exchange switchboard, else None.
+fn exchange_board_window(look: &Looker, sid: &str, pane: &str) -> Option<String> {
     if mux::is_tmux_id(pane) {
         let (code, out, _) = mux::tmux_s(&["display-message", "-p", "-t", pane, "#{@cbar_role}\t#{window_id}"]);
         let (role, wid) = out.trim().split_once('\t')?;
-        return (code == 0 && role == "main" && !look.hide.contains(pane)).then(|| wid.to_string());
+        return (code == 0 && role == ROLE_EXCHANGE && !look.hide.contains(pane)).then(|| wid.to_string());
     }
     let blocks = rex_json(&["block", "ls", "-s", sid, "--json"])?;
     let b = blocks["blocks"].as_array()?.iter().find(|b| b["block_id"] == pane)?;
-    rex_main_board(look, sid, b).map(|_| b["window_id"].as_str().unwrap_or("").to_string())
+    rex_exchange_board(look, sid, b).map(|_| b["window_id"].as_str().unwrap_or("").to_string())
 }
 
 // ---- the live board --------------------------------------------------------------
@@ -583,13 +612,15 @@ fn main_window(look: &Looker, sid: &str, pane: &str) -> Option<String> {
 struct Shared {
     data: Snapshot,
     client: Option<String>,
-    main: Option<MainHit>,
+    /// The exchange switchboard a scoped board's link jumps to, once found.
+    exchange_board: Option<ExchangeBoard>,
     status: Option<(Color, String, Instant)>,
 }
 
 struct Board {
     view: View,
-    /// For a main board: the exchange it toggles back to from all.
+    /// The exchange: an exchange switchboard toggles back to it from all; a
+    /// scoped one's link and 0 jump to its switchboard.
     exchange: String,
     default: String,
     exchanges: Vec<String>,
@@ -608,7 +639,7 @@ struct Board {
 impl Board {
     fn scope(&self) -> Option<&str> {
         match &self.view {
-            View::Scoped(sid, _) => Some(sid),
+            View::Scoped(sid, ..) => Some(sid),
             _ => None,
         }
     }
@@ -706,7 +737,7 @@ impl Board {
 
     fn names(&self, sid: &str, wid: Option<&str>, bid: Option<&str>) -> (String, String) {
         let sh = self.shared.lock().unwrap();
-        if let View::Scoped(_, label) = &self.view {
+        if let View::Scoped(_, label, _) = &self.view {
             let mut tab = sh.data.iter().find(|(g, _)| g.window_id.as_deref() == wid).map(|(g, _)| g.label.clone()).unwrap_or_default();
             if let Some(p) = sh.data.iter().flat_map(|(_, ps)| ps).find(|p| Some(p.block_id.as_str()) == bid) {
                 let pn = if p.label.is_empty() || p.label == "shell" { p.program.clone() } else { p.label.clone() };
@@ -737,29 +768,29 @@ impl Board {
         });
     }
 
-    fn jump_main(&mut self) {
+    fn jump_exchange_board(&mut self) {
         self.link_at = Some(Instant::now());
         let ex = self.exchange.clone();
         self.say(MUTED, format!("→ {ex}"));
         let (shared, look, default) = (self.shared.clone(), self.look.clone(), self.default.clone());
         std::thread::spawn(move || {
-            let cached = shared.lock().unwrap().main.clone();
-            // still there, still the main switchboard? it may have moved tabs
-            let cached = cached.and_then(|(sid, l, _, bid)| main_window(&look, &sid, &bid).map(|w| (sid, l, w, bid)));
+            let cached = shared.lock().unwrap().exchange_board.clone();
+            // still there, still the exchange switchboard? it may have moved tabs
+            let cached = cached.and_then(|(sid, l, _, bid)| exchange_board_window(&look, &sid, &bid).map(|w| (sid, l, w, bid)));
             let was_cached = cached.is_some();
-            let mut target = cached.or_else(|| find_main(&look, &ex, &default));
-            shared.lock().unwrap().main = target.clone();
+            let mut target = cached.or_else(|| find_exchange_board(&look, &ex, &default));
+            shared.lock().unwrap().exchange_board = target.clone();
             for attempt in 0..2 {
                 let Some((sid, label, wid, bid)) = target.clone() else {
-                    shared.lock().unwrap().status = Some((BLOCKED, format!("✗ no {ex} switchboard"), Instant::now()));
+                    shared.lock().unwrap().status = Some((BLOCKED, format!("✗ no switchboard for exchange {ex}"), Instant::now()));
                     return;
                 };
                 if jump_to(&shared, &sid, Some(&wid), Some(&bid), &label) || attempt == 1 || !was_cached {
                     return;
                 }
                 // the cached pane may have just gone; look again once
-                target = find_main(&look, &ex, &default);
-                shared.lock().unwrap().main = target.clone();
+                target = find_exchange_board(&look, &ex, &default);
+                shared.lock().unwrap().exchange_board = target.clone();
             }
         });
     }
@@ -768,7 +799,7 @@ impl Board {
         self.link_hover || self.link_at.is_some_and(|t| t.elapsed() < Duration::from_millis(600))
     }
 
-    /// Whether screen column X (0-based) on screen line LINE is on the main link.
+    /// Whether screen column X (0-based) on screen line LINE is on the exchange link.
     fn on_link(&self, x: usize, line: usize) -> bool {
         if self.scope().is_none() || self.offset + line != 0 {
             return false;
@@ -803,7 +834,7 @@ impl Board {
     fn click(&mut self, x: usize, line: usize) {
         if self.on_link(x, line) {
             if !self.just_focused() {
-                self.jump_main();
+                self.jump_exchange_board();
             }
             return;
         }
@@ -837,7 +868,7 @@ impl Board {
                     }
                 }
             }
-            KeyCode::Char('0') | KeyCode::Char('~') if self.scope().is_some() => self.jump_main(),
+            KeyCode::Char('0') | KeyCode::Char('~') if self.scope().is_some() => self.jump_exchange_board(),
             KeyCode::Char('a') => match &self.view {
                 View::Exchange(_) => self.view = View::All,
                 View::All => self.view = View::Exchange(self.exchange.clone()),
@@ -860,7 +891,7 @@ impl Board {
 /// ESC [ < 35 ; 5 ; 3 M as the mouse moves. When one reaches it in two reads,
 /// crossterm reads the lone ESC as the Esc key and the rest as typed keys
 /// (`[`, `<`, `3`, `5`…, and a digit jumps to a session). Esc used to quit:
-/// that is how a main board in a pane the Rex app was showing dropped to a
+/// that is how an exchange switchboard in a pane the Rex app was showing dropped to a
 /// shell. Now Esc does nothing, and the characters that closely follow it
 /// are dropped.
 #[derive(Default)]
@@ -1048,8 +1079,8 @@ fn live(mut board: Board) {
                 }
                 if scope.is_some() && looked.is_none_or(|t| t.elapsed() > Duration::from_secs(30)) {
                     looked = Some(Instant::now());
-                    let hit = find_main(&look, &ex, &default);
-                    shared.lock().unwrap().main = hit;
+                    let hit = find_exchange_board(&look, &ex, &default);
+                    shared.lock().unwrap().exchange_board = hit;
                 }
                 std::thread::sleep(Duration::from_secs(2));
             }
@@ -1232,7 +1263,12 @@ pub fn main(args: Vec<String>) {
     let view = match &scope {
         Some(g) => {
             let label = if g.label.is_empty() { g.session_id.chars().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect() } else { title(&g.label, &View::Exchange(exchange.clone())) };
-            View::Scoped(g.session_id.clone(), label)
+            let whose = match g.label.split_once(SEP) {
+                Some((e, _)) if home.exchange_exists(e) => Whose::Project,
+                None if home.exchange_exists(&g.label) => Whose::Exchange,
+                _ => Whose::Other,
+            };
+            View::Scoped(g.session_id.clone(), label, whose)
         }
         None if has("--all") => View::All,
         None => View::Exchange(exchange.clone()),
@@ -1260,10 +1296,10 @@ pub fn main(args: Vec<String>) {
         print!("{}", ansi(&render(&data, &view, cols, 0, None, &exchange, false).lines));
         return;
     }
-    // in tmux, mark this pane so others can find the main switchboard
+    // in tmux, mark this pane so others can find the exchange switchboard
     let pane = util::env("TMUX_PANE");
     let marked = pane.as_ref().is_some_and(|p| {
-        let role = if scope.is_some() { "local" } else { "main" };
+        let role = if scope.is_some() { ROLE_SESSION } else { ROLE_EXCHANGE };
         let shown = match &view {
             View::All => "*".to_string(),
             _ => exchange.clone(),
@@ -1275,7 +1311,7 @@ pub fn main(args: Vec<String>) {
         exchange,
         default,
         exchanges,
-        shared: Arc::new(Mutex::new(Shared { data: Vec::new(), client: None, main: None, status: None })),
+        shared: Arc::new(Mutex::new(Shared { data: Vec::new(), client: None, exchange_board: None, status: None })),
         look: Arc::new(look),
         selected: None,
         targets: Vec::new(),
@@ -1296,10 +1332,11 @@ pub fn main(args: Vec<String>) {
 const HELP: &str = "
 usage: switchboard [--exchange NAME|--all|--here|--session NAME] [--once|--json|--watch]
 
-  switchboard                   the main board: this exchange's sessions
-  switchboard --exchange NAME   the main board of exchange NAME
+  switchboard                   the exchange switchboard: this exchange's sessions
+  switchboard --exchange NAME   the switchboard of exchange NAME
   switchboard --all             every session, by exchange
-  switchboard --session NAME    live view of one session: a card per tab
+  switchboard --session NAME    one session's tabs, a card each (a project's session:
+                                its project switchboard)
   switchboard --here            same, for this pane's session
   --once                        print once and exit
   --json                        print the panes as JSON and exit
@@ -1307,8 +1344,8 @@ usage: switchboard [--exchange NAME|--all|--here|--session NAME] [--once|--json|
                                 stops or closes
 
 Keys:  j/k ↑/↓ select · J/K tab/shift-tab next/prev session · g/G first/last
-       enter jump · 1-9 session N · a this exchange / all · 0 main board · q quit
-Mouse: click a row or a card header to jump, wheel to move, ↖ to the main board
+       enter jump · 1-9 session N · a this exchange / all · 0 exchange switchboard · q quit
+Mouse: click a row or a card header to jump, wheel to move, ↖ to the exchange switchboard
 
 A live board logs its start, and why it exits, to ~/.crossbar/logs/switchboard.log,
 and says why on its pane.
@@ -1353,7 +1390,7 @@ mod tests {
             exchange: "central".into(),
             default: "central".into(),
             exchanges: vec!["central".into()],
-            shared: Arc::new(Mutex::new(Shared { data: Vec::new(), client: None, main: None, status: None })),
+            shared: Arc::new(Mutex::new(Shared { data: Vec::new(), client: None, exchange_board: None, status: None })),
             look: Arc::new(Looker::new(false)),
             selected: None,
             targets: Vec::new(),
@@ -1391,7 +1428,7 @@ mod tests {
     }
 
     #[test]
-    fn scores_main_boards() {
+    fn scores_exchange_boards() {
         assert_eq!(fit_score("central", "central", "central", "central"), Some(0));
         assert_eq!(fit_score("", "central", "central", "central"), Some(0));
         assert_eq!(fit_score("", "other", "central", "central"), Some(1));
@@ -1420,12 +1457,23 @@ mod tests {
         let data = vec![(Group { session_id: "s".into(), label: "central/stats".into(), mux: "tmux".into(), window_id: None }, vec![p])];
         let f = render(&data, &View::Exchange("central".into()), 60, 0, None, "central", false);
         let text: Vec<String> = f.lines.iter().map(|l| l.spans.iter().map(|s| s.content.to_string()).collect()).collect();
-        assert!(text[0].starts_with("◇ switchboard central · agents & panes by session"));
+        assert!(text[0].starts_with("◇ switchboard exchange central · projects & agents "));
         assert_eq!(text[1], "✓ 1 done");
         assert!(text[3].starts_with("╭─ stats tmux ~/x ─") && text[3].ends_with("─ 1 ─╮"), "{}", text[3]);
         assert!(text[4].contains("✓ fix-x            done") && text[4].ends_with("2m │"), "{}", text[4]);
         assert!(text[5].contains("all good"));
         assert!(text.iter().all(|l| l.chars().count() == 60 || l.is_empty() || !l.starts_with(['╭', '│', '╰'])));
         assert_eq!(f.targets[4], Some(Target::Pane("s".into(), "w".into(), "b".into())));
+        // a scoped board says whose it is: a project's, the exchange's, or just a session's
+        let head = |label: &str, whose| {
+            let f = render(&data, &View::Scoped("s".into(), label.into(), whose), 80, 0, None, "central", false);
+            f.lines[0].spans.iter().map(|s| s.content.to_string()).collect::<String>()
+        };
+        let h = head("stats", Whose::Project);
+        assert!(h.starts_with("◇ switchboard project stats · tabs & agents") && h.contains("↖ central"), "{h}");
+        let h = head("central", Whose::Exchange);
+        assert!(h.starts_with("◇ switchboard exchange central · tabs & agents"), "{h}");
+        let h = head("notes", Whose::Other);
+        assert!(h.starts_with("◇ switchboard notes · tabs & agents"), "{h}");
     }
 }

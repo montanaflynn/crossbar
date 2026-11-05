@@ -72,8 +72,6 @@ fn reports(look: &Looker, home: &Home, scope: &str, label: &str) -> HashMap<Stri
             } else if p.tab == OPERATOR {
                 if let Some(project) = g.label.strip_prefix(&prefix) {
                     add(format!("{project} operator"), p);
-                } else if label == "central" && !g.label.contains(SEP) {
-                    add(format!("{} operator", g.label), p);
                 }
             }
         }

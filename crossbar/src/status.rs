@@ -6,8 +6,9 @@
 //! dead relay's status is stale). Any other Claude's comes from `claude agents`,
 //! matched to the pane whose process it descends from: idle, working or
 //! blocked, with no message. Switchboards mark their own pane with @cbar_role
-//! (main or local) and, for a main board, @cbar_exchange; cbar labels panes
-//! it makes with @cbar_label.
+//! ("main" for an exchange switchboard, "local" for one session's, such as a
+//! project switchboard) and, for an exchange switchboard, @cbar_exchange; cbar
+//! labels panes it makes with @cbar_label.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -185,8 +186,8 @@ pub fn argv_of(pid: i64) -> Vec<String> {
 }
 
 /// What a switchboard's ARGV makes it: None if it isn't one, Some(None) for
-/// a local board, Some(Some(EXCHANGE)) for a main board ("*" for --all, ""
-/// for the default exchange).
+/// one session's (a project switchboard), Some(Some(EXCHANGE)) for an
+/// exchange switchboard ("*" for --all, "" for the default exchange).
 pub fn board_kind(argv: &[String]) -> Option<Option<String>> {
     let i = argv.iter().position(|a| util::basename(a) == "switchboard")?;
     let rest = &argv[i + 1..];

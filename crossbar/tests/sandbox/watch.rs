@@ -178,8 +178,9 @@ fn guard_cases(s: &Sandbox) {
 
     let check = s.cbar(&["watch", "--check"], Some("alpha"));
     let v: serde_json::Value = serde_json::from_str(check.out.trim()).unwrap_or_default();
-    let reason = v["reason"].as_str().unwrap_or("");
-    s.check("guard: the Stop hook blocks", check.code == 0 && v["decision"] == "block", check.to_string());
+    let fed = &v["hookSpecificOutput"];
+    let reason = fed["additionalContext"].as_str().unwrap_or("");
+    s.check("guard: the Stop hook keeps Claude going", check.code == 0 && fed["hookEventName"] == "Stop" && !reason.is_empty(), check.to_string());
     let want = format!("cbar watch isn't running for {alpha}; 1 event is waiting: {waiting}. Start `cbar watch --next` as a background Bash command");
     s.check("guard: saying what waits", reason.starts_with(&want), reason);
 
@@ -213,7 +214,7 @@ fn guard_cases(s: &Sandbox) {
     let _ = p.child.wait();
     let check = s.cbar(&["watch", "--check"], Some("alpha"));
     let v: serde_json::Value = serde_json::from_str(check.out.trim()).unwrap_or_default();
-    let reason = v["reason"].as_str().unwrap_or("");
+    let reason = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap_or("");
     s.check("guard: a killed watch is no watch", reason.starts_with(&format!("cbar watch isn't running for {alpha}; no events are waiting yet.")), check.to_string());
     let errs = read(s.root.join("guard-1.err")) + &read(s.root.join("guard-2.err"));
     s.check("guard: the watches wrote no errors", errs.trim().is_empty(), errs.trim());

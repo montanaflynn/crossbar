@@ -1328,8 +1328,8 @@ fn cmd_watch(home: &Home, args: Vec<String>) {
 
 /// cbar watch --check: the Stop hook crossbar gives the supervisors and
 /// operators it starts (see watch_guard). Its input, the hook's JSON, comes
-/// on stdin. If no watch runs for this pane's session, it blocks the stop
-/// with why (the reason Claude reads next); else it says nothing. Anything
+/// on stdin. If no watch runs for this pane's session, it keeps Claude going
+/// with why (what Claude reads next); else it says nothing. Anything
 /// in the way (not in a pane, no such session) lets the turn end. Run by
 /// hand (stdin a terminal), it says what it found and exits 1 if no watch runs.
 fn watch_check(home: &Home) {
@@ -1354,8 +1354,16 @@ fn watch_check(home: &Home) {
             println!("{why}");
             std::process::exit(1)
         }
-        Some(why) => println!("{}", serde_json::json!({"decision": "block", "reason": why})),
+        Some(why) => println!("{}", stop_hook_output(&why)),
     }
+}
+
+/// What the Stop hook prints to keep Claude going with WHY: as Stop hook
+/// feedback (additionalContext), which goes on through the same loop guards
+/// as `decision: block` (stop_hook_active, the continuation cap) but isn't
+/// shown to the user as a hook error each time.
+fn stop_hook_output(why: &str) -> serde_json::Value {
+    serde_json::json!({"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": why}})
 }
 
 fn cmd_board(home: &Home, args: Vec<String>) {
@@ -1437,6 +1445,9 @@ mod tests {
         assert_eq!(hook["type"], "command");
         let cmd = hook["command"].as_str().unwrap();
         assert!(cmd.ends_with(" watch --check") && cmd.contains(&*launch::self_exe().to_string_lossy()), "{cmd}");
+        let out = stop_hook_output("why");
+        assert_eq!(out["hookSpecificOutput"]["hookEventName"], "Stop");
+        assert_eq!(out["hookSpecificOutput"]["additionalContext"], "why");
         assert_eq!(no_watch(0), " · no watch");
         assert_eq!(no_watch(2), " · no watch (2 waiting)");
     }
